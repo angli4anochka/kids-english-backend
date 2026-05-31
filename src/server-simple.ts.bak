@@ -1,0 +1,821 @@
+import express from 'express';
+import cors from 'cors';
+import { Pool } from 'pg';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 3002;
+
+// Database connection
+const poolConfig: any = {
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT || '5432'),
+  database: process.env.DB_NAME || 'kids_english',
+  user: process.env.DB_USER || 'postgres',
+};
+
+// Only add password if it's provided
+if (process.env.DB_PASSWORD) {
+  poolConfig.password = process.env.DB_PASSWORD;
+}
+
+const pool = new Pool(poolConfig);
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', service: 'kids-english-backend' });
+});
+
+// GET /lessons - Get all lessons
+app.get('/lessons', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM lessons
+      ORDER BY created_at DESC
+    `);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching lessons:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch lessons' });
+  }
+});
+
+// GET /lessons/:id - Get lesson by ID
+app.get('/lessons/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('SELECT * FROM lessons WHERE id = $1', [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Lesson not found' });
+    }
+
+    // Get activities for this lesson
+    const activities = await pool.query(
+      'SELECT * FROM lesson_activities WHERE lesson_id = $1 ORDER BY order_index',
+      [id]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        ...result.rows[0],
+        activities: activities.rows
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching lesson:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch lesson' });
+  }
+});
+
+// POST /lessons - Create new lesson
+app.post('/lessons', async (req, res) => {
+  try {
+    const { title, description, islandId, emoji } = req.body;
+
+    const result = await pool.query(`
+      INSERT INTO lessons (title, description, island_id, emoji, status)
+      VALUES ($1, $2, $3, $4, 'draft')
+      RETURNING *
+    `, [title, description || null, islandId || null, emoji || '🏝️']);
+
+    res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error creating lesson:', error);
+    res.status(500).json({ success: false, error: 'Failed to create lesson' });
+  }
+});
+
+// PUT /lessons/:id - Update lesson
+app.put('/lessons/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, status } = req.body;
+
+    const result = await pool.query(`
+      UPDATE lessons
+      SET title = COALESCE($1, title),
+          description = COALESCE($2, description),
+          status = COALESCE($3, status),
+          updated_at = NOW()
+      WHERE id = $4
+      RETURNING *
+    `, [title, description, status, id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Lesson not found' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error updating lesson:', error);
+    res.status(500).json({ success: false, error: 'Failed to update lesson' });
+  }
+});
+
+// GET /lessons/:lessonId/activities - Get all activities for a lesson
+app.get('/lessons/:lessonId/activities', async (req, res) => {
+  try {
+    const { lessonId } = req.params;
+
+    const result = await pool.query(
+      'SELECT * FROM lesson_activities WHERE lesson_id = $1 ORDER BY order_index',
+      [lessonId]
+    );
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching activities:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch activities' });
+  }
+});
+
+// POST /lessons/:lessonId/activities - Add activity to lesson
+app.post('/lessons/:lessonId/activities', async (req, res) => {
+  try {
+    const { lessonId } = req.params;
+    const { type, title, subtitle, contentUrl, contentData, points } = req.body;
+
+    // Get next order_index
+    const maxOrder = await pool.query(
+      'SELECT MAX(order_index) as max FROM lesson_activities WHERE lesson_id = $1',
+      [lessonId]
+    );
+    const nextOrder = (maxOrder.rows[0].max || 0) + 1;
+
+    const result = await pool.query(`
+      INSERT INTO lesson_activities
+      (lesson_id, type, title, subtitle, content_url, content_data, order_index, points)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `, [lessonId, type, title, subtitle || null, contentUrl || null,
+        contentData ? JSON.stringify(contentData) : null, nextOrder, points || 10]);
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Error creating activity:', error);
+    res.status(500).json({ error: 'Failed to create activity' });
+  }
+});
+
+// PUT /lessons/:lessonId/activities/:activityId - Update activity
+app.put('/lessons/:lessonId/activities/:activityId', async (req, res) => {
+  try {
+    const { activityId } = req.params;
+    const { type, title, subtitle, contentUrl, contentData, points } = req.body;
+
+    const result = await pool.query(`
+      UPDATE lesson_activities
+      SET type = COALESCE($1, type),
+          title = COALESCE($2, title),
+          subtitle = COALESCE($3, subtitle),
+          content_url = COALESCE($4, content_url),
+          content_data = COALESCE($5, content_data),
+          points = COALESCE($6, points)
+      WHERE id = $7
+      RETURNING *
+    `, [type, title, subtitle, contentUrl,
+        contentData ? JSON.stringify(contentData) : null, points, activityId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Activity not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating activity:', error);
+    res.status(500).json({ error: 'Failed to update activity' });
+  }
+});
+
+// POST /auth/register - Simple registration (без пароля для простоты)
+app.post('/auth/register', async (req, res) => {
+  try {
+    const { email, displayName } = req.body;
+
+    if (!email || !displayName) {
+      return res.status(400).json({ success: false, error: 'Email and display name are required' });
+    }
+
+    // Check if user already exists
+    const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ success: false, error: 'User already exists' });
+    }
+
+    // Create new user
+    const result = await pool.query(`
+      INSERT INTO users (email, display_name, role, auth_provider)
+      VALUES ($1, $2, 'teacher', 'email')
+      RETURNING *
+    `, [email, displayName]);
+
+    const user = result.rows[0];
+    const token = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
+
+    res.json({
+      success: true,
+      data: {
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          displayName: user.display_name,
+          role: user.role,
+          avatarColor: user.avatar_color || '#3B82F6',
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error in registration:', error);
+    res.status(500).json({ success: false, error: 'Registration failed' });
+  }
+});
+
+// POST /auth/login - Simple login (без пароля)
+app.post('/auth/login', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required' });
+    }
+
+    // Find user by email
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const user = result.rows[0];
+    const token = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
+
+    res.json({
+      success: true,
+      data: {
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          displayName: user.display_name,
+          role: user.role,
+          avatarColor: user.avatar_color || '#3B82F6',
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error in login:', error);
+    res.status(500).json({ success: false, error: 'Login failed' });
+  }
+});
+
+// ===== COURSES API =====
+
+// GET /courses - Get all courses for a teacher
+app.get('/courses', async (req, res) => {
+  try {
+    const { teacherId } = req.query;
+
+    if (!teacherId) {
+      return res.status(400).json({ success: false, error: 'Teacher ID is required' });
+    }
+
+    const result = await pool.query(`
+      SELECT * FROM courses
+      WHERE teacher_id = $1
+      ORDER BY created_at DESC
+    `, [teacherId]);
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching courses:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch courses' });
+  }
+});
+
+// POST /courses - Create a new course
+app.post('/courses', async (req, res) => {
+  try {
+    const { name, teacherId, description, emoji } = req.body;
+
+    if (!name || !teacherId) {
+      return res.status(400).json({ success: false, error: 'Name and teacher ID are required' });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO courses (name, teacher_id, description, emoji)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+    `, [name, teacherId, description || '', emoji || '📚']);
+
+    res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error creating course:', error);
+    res.status(500).json({ success: false, error: 'Failed to create course' });
+  }
+});
+
+// GET /courses/:id/groups - Get groups assigned to a course with progress
+app.get('/courses/:id/groups', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(`
+      SELECT g.*,
+             gc.started_at,
+             gc.current_lesson_id,
+             gc.completed_lessons,
+             gc.is_active,
+             l.title as current_lesson_title
+      FROM groups g
+      INNER JOIN group_courses gc ON g.id = gc.group_id
+      LEFT JOIN lessons l ON gc.current_lesson_id = l.id
+      WHERE gc.course_id = $1
+      ORDER BY g.name
+    `, [id]);
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching course groups:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch course groups' });
+  }
+});
+
+// POST /courses/:id/groups - Assign a group to a course
+app.post('/courses/:id/groups', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { groupId } = req.body;
+
+    if (!groupId) {
+      return res.status(400).json({ success: false, error: 'Group ID is required' });
+    }
+
+    // Check if already assigned
+    const existing = await pool.query(
+      'SELECT * FROM group_courses WHERE group_id = $1 AND course_id = $2',
+      [groupId, id]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Group is already assigned to this course'
+      });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO group_courses (group_id, course_id, is_active)
+      VALUES ($1, $2, true)
+      RETURNING *
+    `, [groupId, id]);
+
+    res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error assigning group to course:', error);
+    res.status(500).json({ success: false, error: 'Failed to assign group to course' });
+  }
+});
+
+// DELETE /courses/:courseId/groups/:groupId - Remove group from course
+app.delete('/courses/:courseId/groups/:groupId', async (req, res) => {
+  try {
+    const { courseId, groupId } = req.params;
+
+    const result = await pool.query(`
+      DELETE FROM group_courses
+      WHERE course_id = $1 AND group_id = $2
+      RETURNING *
+    `, [courseId, groupId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Assignment not found' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error removing group from course:', error);
+    res.status(500).json({ success: false, error: 'Failed to remove group from course' });
+  }
+});
+
+// PUT /groups/:groupId/current-lesson - Set current lesson for a group
+app.put('/groups/:groupId/current-lesson', async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { lessonId, courseId } = req.body;
+
+    if (!lessonId) {
+      return res.status(400).json({ success: false, error: 'Lesson ID is required' });
+    }
+
+    // Update current_lesson_id in group_courses
+    const result = await pool.query(`
+      UPDATE group_courses
+      SET current_lesson_id = $1
+      WHERE group_id = $2 AND course_id = $3
+      RETURNING *
+    `, [lessonId, groupId, courseId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Group not assigned to this course' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error setting current lesson:', error);
+    res.status(500).json({ success: false, error: 'Failed to set current lesson' });
+  }
+});
+
+// ===== GROUPS & STUDENTS API =====
+
+// GET /groups - Get all groups for a teacher
+app.get('/groups', async (req, res) => {
+  try {
+    const { teacherId } = req.query;
+
+    if (!teacherId) {
+      return res.status(400).json({ success: false, error: 'Teacher ID is required' });
+    }
+
+    const result = await pool.query(`
+      SELECT g.*,
+             json_agg(
+               json_build_object(
+                 'id', s.id,
+                 'group_id', s.group_id,
+                 'student_name', s.student_name,
+                 'login', s.login,
+                 'password_hash', s.password_hash,
+                 'plain_password', s.plain_password,
+                 'created_at', s.created_at
+               ) ORDER BY s.student_name
+             ) FILTER (WHERE s.id IS NOT NULL) as students
+      FROM groups g
+      LEFT JOIN group_students s ON g.id = s.group_id
+      WHERE g.teacher_id = $1
+      GROUP BY g.id
+      ORDER BY g.created_at DESC
+    `, [teacherId]);
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching groups:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch groups' });
+  }
+});
+
+// GET /groups/:id/progress - Get lesson progress for a group
+app.get('/groups/:id/progress', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // For now, just return lessons for this group without progress data
+    // since group_lesson_progress table doesn't exist yet
+    const result = await pool.query(`
+      SELECT
+        l.id as lesson_id,
+        l.title as lesson_title,
+        l.island_id,
+        l.order_index
+      FROM lessons l
+      WHERE l.group_id = $1
+      ORDER BY l.island_id, l.order_index
+    `, [id]);
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching group progress:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch group progress' });
+  }
+});
+
+// POST /groups - Create a new group
+app.post('/groups', async (req, res) => {
+  try {
+    const { name, teacherId } = req.body;
+
+    if (!name || !teacherId) {
+      return res.status(400).json({ success: false, error: 'Name and teacher ID are required' });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO groups (name, teacher_id)
+      VALUES ($1, $2)
+      RETURNING *
+    `, [name, teacherId]);
+
+    res.status(201).json({
+      success: true,
+      data: {
+        ...result.rows[0],
+        students: []
+      }
+    });
+  } catch (error) {
+    console.error('Error creating group:', error);
+    res.status(500).json({ success: false, error: 'Failed to create group' });
+  }
+});
+
+// DELETE /groups/:id - Delete a group
+app.delete('/groups/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // First delete all group_students in the group
+    await pool.query('DELETE FROM group_students WHERE group_id = $1', [id]);
+
+    // Then delete the group
+    const result = await pool.query('DELETE FROM groups WHERE id = $1 RETURNING *', [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Group not found' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error deleting group:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete group' });
+  }
+});
+
+// POST /students - Create a new student
+app.post('/students', async (req, res) => {
+  try {
+    const { groupId, studentName, login, password } = req.body;
+
+    if (!groupId || !studentName || !login || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Group ID, student name, login and password are required'
+      });
+    }
+
+    // Check if login already exists
+    const existingStudent = await pool.query(
+      'SELECT * FROM group_students WHERE login = $1',
+      [login]
+    );
+
+    if (existingStudent.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Логин "${login}" уже используется`
+      });
+    }
+
+    // Hash password (простое хеширование для примера, в продакшене используйте bcrypt)
+    const bcrypt = require('bcrypt');
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const result = await pool.query(`
+      INSERT INTO group_students (group_id, student_name, login, password_hash)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+    `, [groupId, studentName, login, passwordHash]);
+
+    res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error creating student:', error);
+    res.status(500).json({ success: false, error: 'Failed to create student' });
+  }
+});
+
+// PUT /students/:id - Update student credentials
+app.put('/students/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { login, password } = req.body;
+
+    // Allow empty login (will be stored as empty string or null)
+    const loginValue = login && login.trim() !== '' ? login.trim() : null;
+
+    // Check if login is already used by another student (only if login is not empty)
+    if (loginValue) {
+      const existingStudent = await pool.query(
+        'SELECT * FROM group_students WHERE login = $1 AND id != $2',
+        [loginValue, id]
+      );
+
+      if (existingStudent.rows.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: `Логин "${loginValue}" уже используется другим учеником`
+        });
+      }
+    }
+
+    let result;
+
+    if (password && password.trim() !== '') {
+      // Update both login and password
+      const bcrypt = require('bcrypt');
+      const passwordHash = await bcrypt.hash(password, 10);
+
+      result = await pool.query(`
+        UPDATE group_students
+        SET login = $1, password_hash = $2, plain_password = $3
+        WHERE id = $4
+        RETURNING *
+      `, [loginValue, passwordHash, password.trim(), id]);
+    } else {
+      // Update only login
+      result = await pool.query(`
+        UPDATE group_students
+        SET login = $1
+        WHERE id = $2
+        RETURNING *
+      `, [loginValue, id]);
+    }
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Student not found' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error updating student:', error);
+    res.status(500).json({ success: false, error: 'Failed to update student' });
+  }
+});
+
+// DELETE /students/:id - Delete a student
+app.delete('/students/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query('DELETE FROM group_students WHERE id = $1 RETURNING *', [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Student not found' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error deleting student:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete student' });
+  }
+});
+
+// POST /auth/student-login - Student login
+app.post('/auth/student-login', async (req, res) => {
+  try {
+    const { login, password } = req.body;
+
+    if (!login || !password) {
+      return res.status(400).json({ success: false, error: 'Login and password are required' });
+    }
+
+    // Find student by login
+    const result = await pool.query(`
+      SELECT s.*, g.name as group_name
+      FROM group_students s
+      JOIN groups g ON s.group_id = g.id
+      WHERE s.login = $1
+    `, [login]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Неверный логин или пароль' });
+    }
+
+    const student = result.rows[0];
+
+    // Verify password
+    const bcrypt = require('bcrypt');
+    const passwordMatch = await bcrypt.compare(password, student.password_hash);
+
+    if (!passwordMatch) {
+      return res.status(401).json({ success: false, error: 'Неверный логин или пароль' });
+    }
+
+    // Generate token
+    const token = Buffer.from(`student:${student.id}:${Date.now()}`).toString('base64');
+
+    res.json({
+      success: true,
+      data: {
+        token,
+        user: {
+          id: student.id.toString(),
+          displayName: student.student_name,
+          role: 'student',
+          groupId: student.group_id,
+          groupName: student.group_name,
+          avatarColor: '#10B981',
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error in student login:', error);
+    res.status(500).json({ success: false, error: 'Login failed' });
+  }
+});
+
+// POST /auth/google - Google OAuth authentication
+app.post('/auth/google', async (req, res) => {
+  try {
+    const { code, redirectUri } = req.body;
+
+    if (!code) {
+      return res.status(400).json({ success: false, error: 'Code is required' });
+    }
+
+    // Exchange authorization code for access token
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        code,
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenData.access_token) {
+      console.error('Google token error:', tokenData);
+      return res.status(400).json({ success: false, error: 'Failed to get access token', details: tokenData });
+    }
+
+    // Get user info from Google
+    const userInfoResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: {
+        Authorization: `Bearer ${tokenData.access_token}`,
+      },
+    });
+
+    const googleUser = await userInfoResponse.json();
+
+    if (!googleUser.email) {
+      return res.status(400).json({ success: false, error: 'Failed to get user info' });
+    }
+
+    // Check if user exists in database, if not create them
+    let userResult = await pool.query('SELECT * FROM users WHERE email = $1', [googleUser.email]);
+
+    if (userResult.rows.length === 0) {
+      // Create new user
+      userResult = await pool.query(`
+        INSERT INTO users (email, display_name, role, auth_provider, google_id)
+        VALUES ($1, $2, 'teacher', 'google', $3)
+        RETURNING *
+      `, [googleUser.email, googleUser.name, googleUser.id]);
+    }
+
+    const user = userResult.rows[0];
+
+    // Generate a simple token (in production, use JWT)
+    const token = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
+
+    res.json({
+      success: true,
+      data: {
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          displayName: user.display_name,
+          role: user.role,
+          avatarColor: user.avatar_color || '#3B82F6',
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error in Google OAuth:', error);
+    res.status(500).json({ success: false, error: 'Google authentication failed' });
+  }
+});
+
+// Setup WebSocket
+const http = require('http');
+const httpServer = http.createServer(app);
+const { setupWebSocket } = require('./websocket-server');
+setupWebSocket(httpServer);
+
+// Start server
+httpServer.listen(PORT, () => {
+  console.log(`🚀 Kids English Backend running on port ${PORT}`);
+});
+
+// Handle shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, closing database pool');
+  await pool.end();
+  process.exit(0);
+});

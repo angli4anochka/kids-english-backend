@@ -1,0 +1,199 @@
+import { Server as HttpServer } from 'http';
+import { Server } from 'socket.io';
+
+export function setupWebSocket(httpServer: HttpServer) {
+  const io = new Server(httpServer, {
+    cors: {
+      origin: '*',
+      methods: ['GET', 'POST']
+    },
+    transports: ['websocket', 'polling']
+  });
+
+  io.on('connection', (socket: any) => {
+    console.log(`[WebSocket] Client connected: ${socket.id}`);
+
+    let currentSessionId: string | null = null;
+
+    // Join session/room
+    socket.on('join', (data: any) => {
+      const { lessonId, groupId, role } = data;
+      const roomId = `lesson-${lessonId}-group-${groupId}`;
+
+      socket.join(roomId);
+      currentSessionId = roomId;
+
+      console.log(`[WebSocket] ${socket.id} joined ${roomId} as ${role}`);
+
+      socket.emit('joined', { roomId, socketId: socket.id });
+    });
+
+    // ========== Screen Sharing WebRTC Events ==========
+
+    // Teacher signals they're ready to broadcast screen
+    socket.on('screen-share-ready', (data: any) => {
+      console.log(`[WebRTC] Teacher ready to share screen`);
+      if (currentSessionId) {
+        socket.to(currentSessionId).emit('screen-share-ready', data);
+      }
+    });
+
+    // Student sends offer to teacher
+    socket.on('screen-share-offer', (data: any) => {
+      console.log(`[WebRTC] Received offer from student ${data.studentId}`);
+      if (currentSessionId) {
+        socket.to(currentSessionId).emit('screen-share-offer', data);
+      }
+    });
+
+    // Teacher sends answer to student
+    socket.on('screen-share-answer', (data: any) => {
+      console.log(`[WebRTC] Sending answer to student ${data.studentId}`);
+      if (currentSessionId) {
+        socket.to(currentSessionId).emit('screen-share-answer', data);
+      }
+    });
+
+    // ICE candidate exchange
+    socket.on('screen-share-ice-candidate', (data: any) => {
+      console.log(`[WebRTC] Forwarding ICE candidate`);
+      if (currentSessionId) {
+        socket.to(currentSessionId).emit('screen-share-ice-candidate', {
+          peerId: socket.id,
+          candidate: data.candidate
+        });
+      }
+    });
+
+    // Teacher stops screen sharing
+    socket.on('screen-share-stop', (data: any) => {
+      console.log(`[WebRTC] Teacher stopped screen sharing`);
+      if (currentSessionId) {
+        socket.to(currentSessionId).emit('screen-share-stop', data);
+      }
+    });
+
+    // ========== Video Control Events ==========
+
+    // Teacher controls video playback
+    socket.on('video-control', (data: any) => {
+      console.log(`[Video] Teacher ${data.action} video at ${data.currentTime}s`);
+      if (currentSessionId) {
+        socket.to(currentSessionId).emit('video-control', data);
+      }
+    });
+
+    // Student notifies video is ready
+    socket.on('video-ready', (data: any) => {
+      console.log(`[Video] Student video ready for activity ${data.activityId}`);
+      if (currentSessionId) {
+        socket.to(currentSessionId).emit('video-ready', {
+          ...data,
+          studentId: socket.id,
+          studentName: data.studentName || 'Student'
+        });
+      }
+    });
+
+    // Audio control for synced playback
+    socket.on('audio-control', (data: any) => {
+      console.log(`[Audio] Teacher ${data.action} audio for activity ${data.activityId}`);
+      if (currentSessionId) {
+        socket.to(currentSessionId).emit('audio-control', data);
+      }
+    });
+
+    // ========== Lesson Management Events ==========
+
+    // Join group room (for receiving lesson notifications on island screen)
+    socket.on('join-group-room', (data: { groupId: number }) => {
+      const groupRoomId = `group-${data.groupId}`;
+      socket.join(groupRoomId);
+      console.log(`[Lesson] User ${socket.id} joined group room: ${groupRoomId}`);
+    });
+
+    // Check for active lessons in a group
+    socket.on('check-active-lesson', (data: { groupId: number }) => {
+      console.log(`[Lesson] Student checking for active lessons in group ${data.groupId}`);
+      // This is handled by the frontend - backend just logs it
+      // Teacher will send navigate-to-lesson which will reach students in group room
+    });
+
+    // Join lesson session
+    socket.on('join-lesson-session', (data: { lessonId: string; groupId: number; role: string }) => {
+      const lessonRoomId = `lesson-${data.lessonId}-group-${data.groupId}`;
+      socket.join(lessonRoomId);
+      console.log(`[Lesson] ${data.role} joined lesson session: ${lessonRoomId}`);
+    });
+
+    // Leave lesson session
+    socket.on('leave-lesson-session', (data: { lessonId: string; groupId: number }) => {
+      const lessonRoomId = `lesson-${data.lessonId}-group-${data.groupId}`;
+      socket.leave(lessonRoomId);
+      console.log(`[Lesson] User left lesson session: ${lessonRoomId}`);
+    });
+
+    // Teacher navigates students to a lesson
+    socket.on('navigate-to-lesson', (data: { lessonId: string; groupId: number; url: string }) => {
+      const lessonRoomId = `lesson-${data.lessonId}-group-${data.groupId}`;
+      const groupRoomId = `group-${data.groupId}`;
+      console.log(`[Lesson] 🎯 Teacher navigating students in group ${data.groupId} to ${data.url}`);
+
+      // Broadcast to all students in this group (including those on island screen)
+      socket.to(groupRoomId).emit('navigate-to-lesson', { url: data.url });
+      console.log(`[Lesson] 📢 Sent navigate-to-lesson to group room: ${groupRoomId}`);
+
+      // Also broadcast to lesson room in case some students already joined
+      socket.to(lessonRoomId).emit('navigate-to-lesson', { url: data.url });
+      console.log(`[Lesson] 📢 Sent navigate-to-lesson to lesson room: ${lessonRoomId}`);
+    });
+
+    // Teacher changes activity
+    socket.on('activity-change', (data: { lessonId: string; groupId: number; newIndex: number }) => {
+      const lessonRoomId = `lesson-${data.lessonId}-group-${data.groupId}`;
+      console.log(`[Lesson] Teacher changed activity to index ${data.newIndex} in ${lessonRoomId}`);
+
+      // Broadcast to all students in this lesson/group
+      socket.to(lessonRoomId).emit('activity-change', {
+        lessonId: data.lessonId,
+        newIndex: data.newIndex,
+      });
+    });
+
+    // Teacher toggles interactive mode
+    socket.on('interactive-toggle', (data: { lessonId: string; groupId: number; isEnabled: boolean }) => {
+      const lessonRoomId = `lesson-${data.lessonId}-group-${data.groupId}`;
+      console.log(`[Lesson] Teacher toggled interactive mode to ${data.isEnabled} in ${lessonRoomId}`);
+
+      // Broadcast to all students in this lesson/group
+      socket.to(lessonRoomId).emit('interactive-toggle', {
+        lessonId: data.lessonId,
+        isEnabled: data.isEnabled,
+      });
+    });
+
+    // Student updates progress
+    socket.on('update-progress', (data: { activityIndex: number; score: number; completed: boolean }) => {
+      console.log(`[Lesson] Student ${socket.id} updated progress: activity ${data.activityIndex}, score ${data.score}`);
+
+      // Optionally broadcast to teacher/other students if needed
+      if (currentSessionId) {
+        socket.to(currentSessionId).emit('student-progress-update', {
+          studentId: socket.id,
+          activityIndex: data.activityIndex,
+          score: data.score,
+          completed: data.completed,
+        });
+      }
+    });
+
+    // Disconnect
+    socket.on('disconnect', () => {
+      console.log(`[WebSocket] Client disconnected: ${socket.id}`);
+    });
+  });
+
+  console.log('✅ WebSocket server initialized');
+
+  return io;
+}
