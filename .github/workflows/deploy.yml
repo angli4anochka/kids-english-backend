@@ -1,0 +1,38 @@
+name: Deploy
+
+# Деплой бэкенда через self-hosted runner на VM (исходящий polling, бан не мешает).
+# На push в main: checkout -> rsync в боевую папку -> build:simple -> pm2 restart kids-english-api.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-kids-api
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, kids-api]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync to live dir, build & restart
+        run: |
+          set -euo pipefail
+          APP_DIR="/home/ubuntu/kids-english-backend"   # PM2: kids-english-api
+
+          rsync -a \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'node_modules' \
+            --exclude 'dist' \
+            --exclude '.env' --exclude '.env.*' \
+            ./ "$APP_DIR/"
+
+          cd "$APP_DIR"
+          npm install --production
+          npm run build:simple
+          pm2 restart kids-english-api --update-env
+          echo "✅ kids-english-backend deployed -> https://uniplay-kids.ru/kids-api/"
