@@ -442,28 +442,33 @@ app.get('/sessions/:id', async (req, res) => {
   }
 });
 
-// POST /auth/register - Simple registration (без пароля для простоты)
+// POST /auth/register - Registration with password
 app.post('/auth/register', async (req, res) => {
   try {
-    const { email, displayName } = req.body;
+    const { email, displayName, password } = req.body;
 
-    if (!email || !displayName) {
-      return res.status(400).json({ success: false, error: 'Email and display name are required' });
+    if (!email || !displayName || !password) {
+      return res.status(400).json({ success: false, error: 'Email, name and password are required' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
     }
 
     // Check if user already exists
     const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-
     if (existingUser.rows.length > 0) {
       return res.status(400).json({ success: false, error: 'User already exists' });
     }
 
-    // Create new user
+    const bcrypt = require('bcrypt');
+    const passwordHash = await bcrypt.hash(password, 10);
+
     const result = await pool.query(`
-      INSERT INTO users (email, display_name, role, auth_provider)
-      VALUES ($1, $2, 'teacher', 'email')
+      INSERT INTO users (email, display_name, role, auth_provider, password_hash)
+      VALUES ($1, $2, 'teacher', 'email', $3)
       RETURNING *
-    `, [email, displayName]);
+    `, [email, displayName, passwordHash]);
 
     const user = result.rows[0];
     const token = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
@@ -487,10 +492,10 @@ app.post('/auth/register', async (req, res) => {
   }
 });
 
-// POST /auth/login - Simple login (без пароля)
+// POST /auth/login - Login with password
 app.post('/auth/login', async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, password } = req.body;
 
     if (!email) {
       return res.status(400).json({ success: false, error: 'Email is required' });
@@ -504,6 +509,20 @@ app.post('/auth/login', async (req, res) => {
     }
 
     const user = result.rows[0];
+
+    // If user has a password — verify it
+    if (user.password_hash) {
+      if (!password) {
+        return res.status(401).json({ success: false, error: 'Password is required' });
+      }
+      const bcrypt = require('bcrypt');
+      const match = await bcrypt.compare(password, user.password_hash);
+      if (!match) {
+        return res.status(401).json({ success: false, error: 'Invalid password' });
+      }
+    }
+    // Google-auth users (no password_hash) log in via Google, not this endpoint
+
     const token = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
 
     res.json({
