@@ -123,7 +123,7 @@ app.post('/lessons', async (req, res) => {
 app.put('/lessons/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, status, unit_number } = req.body;
+    const { title, description, status, unit_number, order_index } = req.body;
 
     const setClauses = [
       'title = COALESCE($1, title)',
@@ -135,6 +135,10 @@ app.put('/lessons/:id', async (req, res) => {
     if (unit_number !== undefined) {
       params.push(unit_number);
       setClauses.splice(2, 0, `unit_number = $${params.length}`);
+    }
+    if (order_index !== undefined) {
+      params.push(order_index);
+      setClauses.splice(2, 0, `order_index = $${params.length}`);
     }
 
     const result = await pool.query(
