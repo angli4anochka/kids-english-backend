@@ -109,16 +109,24 @@ app.post('/lessons', async (req, res) => {
 app.put('/lessons/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, status } = req.body;
+    const { title, description, status, unit_number } = req.body;
 
-    const result = await pool.query(`
-      UPDATE lessons
-      SET title = COALESCE($1, title),
-          description = COALESCE($2, description),
-          updated_at = NOW()
-      WHERE id = $3
-      RETURNING *
-    `, [title, description, id]);
+    const setClauses = [
+      'title = COALESCE($1, title)',
+      'description = COALESCE($2, description)',
+      'updated_at = NOW()',
+    ];
+    const params: any[] = [title, description, id];
+
+    if (unit_number !== undefined) {
+      params.push(unit_number);
+      setClauses.splice(2, 0, `unit_number = $${params.length}`);
+    }
+
+    const result = await pool.query(
+      `UPDATE lessons SET ${setClauses.join(', ')} WHERE id = $3 RETURNING *`,
+      params
+    );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Lesson not found' });
@@ -1541,6 +1549,65 @@ app.post('/live-sessions/:sessionId/complete', async (req, res) => {
 });
 
 // ==================== END LIVE SESSIONS ENDPOINTS ====================
+
+// ========== SPOTLIGHT RESULTS ==========
+
+// POST /spotlight/results - student submits exercise results
+app.post('/spotlight/results', async (req, res) => {
+  try {
+    const { lessonId, activityId, sessionId, studentId, studentName, results, score, total } = req.body;
+
+    if (!lessonId || !studentName || !results || total === undefined) {
+      return res.status(400).json({ success: false, error: 'lessonId, studentName, results and total are required' });
+    }
+
+    const row = await pool.query(`
+      INSERT INTO spotlight_results (lesson_id, activity_id, session_id, student_id, student_name, results, score, total)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `, [lessonId, activityId || null, sessionId || null, studentId || null, studentName,
+        JSON.stringify(results), score || 0, total]);
+
+    res.status(201).json({ success: true, data: row.rows[0] });
+  } catch (error) {
+    console.error('Error saving spotlight results:', error);
+    res.status(500).json({ success: false, error: 'Failed to save results' });
+  }
+});
+
+// GET /spotlight/results/:lessonId - teacher gets all student results for a lesson
+app.get('/spotlight/results/:lessonId', async (req, res) => {
+  try {
+    const { lessonId } = req.params;
+    const { activityId, sessionId } = req.query;
+
+    let query = `
+      SELECT * FROM spotlight_results
+      WHERE lesson_id = $1
+    `;
+    const params: any[] = [lessonId];
+
+    if (activityId) {
+      params.push(activityId);
+      query += ` AND activity_id = $${params.length}`;
+    }
+    if (sessionId) {
+      params.push(sessionId);
+      query += ` AND session_id = $${params.length}`;
+    }
+
+    query += ' ORDER BY submitted_at DESC';
+
+    const result = await pool.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching spotlight results:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch results' });
+  }
+});
+
+// ==================== END SPOTLIGHT RESULTS ====================
+
 // Setup WebSocket
 const http = require('http');
 const httpServer = http.createServer(app);
