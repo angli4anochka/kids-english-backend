@@ -554,25 +554,164 @@ app.post('/auth/login', async (req, res) => {
 
 // ===== COURSES API =====
 
-// GET /courses - Get all courses for a teacher
+const SPOTLIGHT_COURSE_ID = 'e50d66db-8350-449e-bfd5-2771b43ba8e2';
+
+// GET /courses - trial => only Spotlight; subscription => all
 app.get('/courses', async (req, res) => {
   try {
     const { teacherId } = req.query;
-
+    const coursesResult = await pool.query('SELECT * FROM courses ORDER BY created_at ASC');
     if (!teacherId) {
-      return res.status(400).json({ success: false, error: 'Teacher ID is required' });
+      return res.json({ success: true, data: coursesResult.rows.map((c: any) => ({ ...c, has_access: true })) });
     }
-
-    const result = await pool.query(`
-      SELECT * FROM courses
-      WHERE teacher_id = $1
-      ORDER BY created_at DESC
-    `, [teacherId]);
-
-    res.json({ success: true, data: result.rows });
+    const subResult = await pool.query(
+      'SELECT u.created_at as registered_at, ts.expires_at'
+      + ' FROM users u'
+      + ' LEFT JOIN teacher_subscriptions ts ON ts.teacher_id = u.id'
+      + ' WHERE u.id = $1',
+      [teacherId]
+    );
+    let status = 'none';
+    if (subResult.rows.length > 0) {
+      const row = subResult.rows[0];
+      const now = new Date();
+      if (row.expires_at && new Date(row.expires_at) > now) {
+        status = 'subscribed';
+      } else {
+        const trialEnd = new Date(new Date(row.registered_at).getTime() + 3 * 86400000);
+        if (trialEnd > now) status = 'trial';
+      }
+    }
+    const data = coursesResult.rows.map((c: any) => {
+      const access = status === 'subscribed' || (status === 'trial' && c.id === SPOTLIGHT_COURSE_ID);
+      return { ...c, has_access: access };
+    });
+    res.json({ success: true, data });
   } catch (error) {
     console.error('Error fetching courses:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch courses' });
+  }
+});
+
+// GET /teacher-subscription - Get teacher subscription status
+app.get('/teacher-subscription', async (req, res) => {
+  try {
+    const { teacherId } = req.query;
+    if (!teacherId) return res.status(400).json({ success: false, error: 'teacherId required' });
+    const result = await pool.query(
+      'SELECT u.created_at as registered_at, ts.expires_at, ts.plan'
+      + ' FROM users u'
+      + ' LEFT JOIN teacher_subscriptions ts ON ts.teacher_id = u.id'
+      + ' WHERE u.id = $1',
+      [teacherId]
+    );
+    if (result.rows.length === 0) {
+      return res.json({ success: true, status: 'trial_expired', daysLeft: 0, plan: null });
+    }
+    const row = result.rows[0];
+    const now = new Date();
+    if (row.expires_at) {
+      const expiresAt = new Date(row.expires_at);
+      const daysLeft = Math.ceil((expiresAt.getTime() - now.getTime()) / 86400000);
+      if (daysLeft > 0) {
+        return res.json({ success: true, status: 'active', daysLeft, plan: row.plan, expiresAt: expiresAt.toISOString() });
+      }
+      return res.json({ success: true, status: 'expired', daysLeft: 0, plan: row.plan });
+    }
+    const trialEndsAt = new Date(new Date(row.registered_at).getTime() + 3 * 86400000);
+    const trialDaysLeft = Math.ceil((trialEndsAt.getTime() - now.getTime()) / 86400000);
+    if (trialDaysLeft > 0) {
+      return res.json({ success: true, status: 'trial', daysLeft: trialDaysLeft, plan: null, expiresAt: trialEndsAt.toISOString() });
+    }
+    return res.json({ success: true, status: 'trial_expired', daysLeft: 0, plan: null });
+  } catch (error) {
+    console.error('Error fetching subscription:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch subscription' });
+  }
+});
+
+// POST /teacher-subscription - Grant/extend teacher subscription
+app.post('/teacher-subscription', async (req, res) => {
+  try {
+    const { teacherId, days, plan } = req.body;
+    if (!teacherId || !days) return res.status(400).json({ success: false, error: 'teacherId and days required' });
+    const daysNum = parseInt(days, 10);
+    const planName = plan || 'monthly';
+    await pool.query(
+      `INSERT INTO teacher_subscriptions (teacher_id, expires_at, plan) VALUES ($1, NOW() + INTERVAL '1 day' * $2, $3)
+       ON CONFLICT (teacher_id) DO UPDATE SET
+       expires_at = GREATEST(teacher_subscriptions.expires_at, NOW()) + INTERVAL '1 day' * $2,
+       plan = $3`,
+      [teacherId, daysNum, planName]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error granting subscription:', error);
+    res.status(500).json({ success: false, error: 'Failed to grant subscription' });
+  }
+});
+
+// POST /teacher-course-access - Grant teacher access to a course
+app.post('/teacher-course-access', async (req, res) => {
+  try {
+    const { teacherId, courseId } = req.body;
+    if (!teacherId || !courseId) return res.status(400).json({ success: false, error: 'teacherId and courseId required' });
+    await pool.query(
+      'INSERT INTO teacher_course_access (teacher_id, course_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [teacherId, courseId]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error granting access:', error);
+    res.status(500).json({ success: false, error: 'Failed to grant access' });
+  }
+});
+
+// DELETE /teacher-course-access - Revoke teacher access to a course
+app.delete('/teacher-course-access', async (req, res) => {
+  try {
+    const { teacherId, courseId } = req.body;
+    if (!teacherId || !courseId) return res.status(400).json({ success: false, error: 'teacherId and courseId required' });
+    await pool.query(
+      'DELETE FROM teacher_course_access WHERE teacher_id = $1 AND course_id = $2',
+      [teacherId, courseId]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error revoking access:', error);
+    res.status(500).json({ success: false, error: 'Failed to revoke access' });
+  }
+});
+
+// GET /admin/teachers - List all teachers with subscription status
+app.get('/admin/teachers', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT u.id, u.display_name, u.email, u.created_at, u.avatar_color, ts.expires_at, ts.plan'
+      + ' FROM users u'
+      + ' LEFT JOIN teacher_subscriptions ts ON ts.teacher_id = u.id'
+      + ' WHERE u.role = $1'
+      + ' ORDER BY u.created_at DESC',
+      ['teacher']
+    );
+    const now = new Date();
+    const teachers = result.rows.map((row: any) => {
+      let status: string, daysLeft = 0;
+      if (row.expires_at) {
+        const expiresAt = new Date(row.expires_at);
+        daysLeft = Math.ceil((expiresAt.getTime() - now.getTime()) / 86400000);
+        status = daysLeft > 0 ? 'active' : 'expired';
+      } else {
+        const trialEndsAt = new Date(new Date(row.created_at).getTime() + 3 * 86400000);
+        daysLeft = Math.ceil((trialEndsAt.getTime() - now.getTime()) / 86400000);
+        status = daysLeft > 0 ? 'trial' : 'trial_expired';
+      }
+      return { id: row.id, displayName: row.display_name, email: row.email, avatarColor: row.avatar_color, createdAt: row.created_at, status, daysLeft: Math.max(0, daysLeft), plan: row.plan, expiresAt: row.expires_at };
+    });
+    res.json({ success: true, data: teachers });
+  } catch (error) {
+    console.error('Error fetching teachers for admin:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch teachers' });
   }
 });
 
