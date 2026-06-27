@@ -85,18 +85,32 @@ app.post('/lessons', async (req, res) => {
   try {
     const { title, description, islandId, emoji, courseId, bookId, unit_number } = req.body;
 
-    // Auto-assign next order_index for this book or island
-    const maxOrderResult = await pool.query(
-      "SELECT COALESCE(MAX(order_index), 0) as max FROM lessons WHERE COALESCE(book_id::text, island_id::text, 'x') = COALESCE($1::text, $2::text, 'x')",
-      [bookId || null, islandId || null]
-    );
-    const nextOrder = (maxOrderResult.rows[0].max || 0) + 1;
+    let insertOrder: number;
+
+    if (bookId && unit_number != null) {
+      // Place right after last lesson of this unit, then shift subsequent lessons down
+      const unitMaxResult = await pool.query(
+        'SELECT COALESCE(MAX(order_index), 0) as max FROM lessons WHERE book_id = $1 AND unit_number = $2 AND COALESCE(is_deleted, false) = false',
+        [bookId, unit_number]
+      );
+      insertOrder = (unitMaxResult.rows[0].max || 0) + 1;
+      await pool.query(
+        'UPDATE lessons SET order_index = order_index + 1 WHERE book_id = $1 AND order_index >= $2 AND COALESCE(is_deleted, false) = false',
+        [bookId, insertOrder]
+      );
+    } else {
+      const maxOrderResult = await pool.query(
+        "SELECT COALESCE(MAX(order_index), 0) as max FROM lessons WHERE COALESCE(book_id::text, island_id::text, 'x') = COALESCE($1::text, $2::text, 'x') AND COALESCE(is_deleted, false) = false",
+        [bookId || null, islandId || null]
+      );
+      insertOrder = (maxOrderResult.rows[0].max || 0) + 1;
+    }
 
     const result = await pool.query(`
       INSERT INTO lessons (title, description, island_id, emoji, status, order_index, course_id, book_id, unit_number)
       VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8)
       RETURNING *
-    `, [title, description || null, islandId || null, emoji || '🏝️', nextOrder, courseId || null, bookId || null, unit_number ?? null]);
+    `, [title, description || null, islandId || null, emoji || '🏝️', insertOrder, courseId || null, bookId || null, unit_number ?? null]);
 
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
@@ -734,6 +748,67 @@ app.post('/courses', async (req, res) => {
   } catch (error) {
     console.error('Error creating course:', error);
     res.status(500).json({ success: false, error: 'Failed to create course' });
+  }
+});
+
+// GET /courses/:id/books - Get books (levels) for a course
+app.get('/courses/:id/books', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM course_books WHERE course_id = $1 ORDER BY order_index, level_number',
+      [id]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching course books:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch course books' });
+  }
+});
+
+// POST /courses/:id/books - Create a book for a course
+app.post('/courses/:id/books', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, level_number, emoji, order_index } = req.body;
+    const result = await pool.query(
+      'INSERT INTO course_books (course_id, title, level_number, emoji, order_index) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [id, title, level_number || null, emoji || '📖', order_index ?? 0]
+    );
+    res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error creating course book:', error);
+    res.status(500).json({ success: false, error: 'Failed to create course book' });
+  }
+});
+
+// GET /books/:id/lessons - Get lessons for a book
+app.get('/books/:id/lessons', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM lessons WHERE book_id = $1 AND COALESCE(is_deleted, false) = false ORDER BY order_index, created_at',
+      [id]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching book lessons:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch book lessons' });
+  }
+});
+
+// GET /books/:id - Get a single book
+app.get('/books/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('SELECT * FROM course_books WHERE id = $1', [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Book not found' });
+    }
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error fetching book:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch book' });
   }
 });
 
@@ -1745,6 +1820,27 @@ app.get('/spotlight/results/:lessonId', async (req, res) => {
   }
 });
 
+// GET /spotlight/session-results - get one student's results for a session
+app.get('/spotlight/session-results', async (req, res) => {
+  try {
+    const { sessionId, studentId } = req.query;
+    if (!sessionId || !studentId) {
+      return res.status(400).json({ success: false, error: 'sessionId and studentId required' });
+    }
+    const result = await pool.query(
+      `SELECT sr.*, la.title as activity_title, la.order_index
+       FROM spotlight_results sr
+       LEFT JOIN lesson_activities la ON la.id = sr.activity_id
+       WHERE sr.session_id =  AND sr.student_id = 
+       ORDER BY la.order_index ASC, sr.submitted_at ASC`,
+      [sessionId, studentId]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching student session results:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch results' });
+  }
+});
 // ==================== END SPOTLIGHT RESULTS ====================
 
 // Setup WebSocket
