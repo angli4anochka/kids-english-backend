@@ -1576,19 +1576,11 @@ app.post('/live-sessions', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing required fields' });
     }
 
-    // Check if there's already an active session for this group
-    const existing = await pool.query(
-      'SELECT id FROM live_sessions WHERE group_id = $1 AND status = $2',
-      [groupId, 'active']
+    // End any existing active session for this group before creating a new one
+    await pool.query(
+      "UPDATE live_sessions SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE group_id = $1 AND status = 'active'",
+      [groupId]
     );
-
-    if (existing.rows.length > 0) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Group already has an active session',
-        sessionId: existing.rows[0].id
-      });
-    }
 
     const result = await pool.query(`
       INSERT INTO live_sessions (lesson_id, group_id, teacher_id, status, current_step_index)
