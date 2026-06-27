@@ -786,6 +786,37 @@ app.post('/courses/:id/books', async (req, res) => {
   }
 });
 
+// PUT /books/:id/lessons/reorder - Atomically reorder all lessons in a book
+app.put('/books/:id/lessons/reorder', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { lessonIds } = req.body as { lessonIds: string[] };
+    if (!Array.isArray(lessonIds) || lessonIds.length === 0) {
+      return res.status(400).json({ success: false, error: 'lessonIds array required' });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (let i = 0; i < lessonIds.length; i++) {
+        await client.query(
+          'UPDATE lessons SET order_index = $1, updated_at = NOW() WHERE id = $2 AND book_id = $3',
+          [i + 1, lessonIds[i], id]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error reordering lessons:', error);
+    res.status(500).json({ success: false, error: 'Failed to reorder lessons' });
+  }
+});
+
 // GET /books/:id/lessons - Get lessons for a book
 app.get('/books/:id/lessons', async (req, res) => {
   try {
