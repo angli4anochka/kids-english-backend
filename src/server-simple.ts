@@ -83,20 +83,20 @@ app.get('/lessons/:id', async (req, res) => {
 // POST /lessons - Create new lesson
 app.post('/lessons', async (req, res) => {
   try {
-    const { title, description, islandId, emoji, courseId } = req.body;
+    const { title, description, islandId, emoji, courseId, bookId, unit_number } = req.body;
 
-    // Auto-assign next order_index for this island
+    // Auto-assign next order_index for this book or island
     const maxOrderResult = await pool.query(
-      'SELECT COALESCE(MAX(order_index), 0) as max FROM lessons WHERE island_id = $1',
-      [islandId || null]
+      "SELECT COALESCE(MAX(order_index), 0) as max FROM lessons WHERE COALESCE(book_id::text, island_id::text, 'x') = COALESCE($1::text, $2::text, 'x')",
+      [bookId || null, islandId || null]
     );
     const nextOrder = (maxOrderResult.rows[0].max || 0) + 1;
 
     const result = await pool.query(`
-      INSERT INTO lessons (title, description, island_id, emoji, status, order_index, course_id)
-      VALUES ($1, $2, $3, $4, 'draft', $5, $6)
+      INSERT INTO lessons (title, description, island_id, emoji, status, order_index, course_id, book_id, unit_number)
+      VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8)
       RETURNING *
-    `, [title, description || null, islandId || null, emoji || '🏝️', nextOrder, courseId || null]);
+    `, [title, description || null, islandId || null, emoji || '🏝️', nextOrder, courseId || null, bookId || null, unit_number ?? null]);
 
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
