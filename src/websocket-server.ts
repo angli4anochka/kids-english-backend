@@ -272,9 +272,10 @@ export function setupWebSocket(httpServer: HttpServer) {
     // New event handlers for live session synchronization
     socket.on('session:activity-change', (data: { sessionId: string; groupId: number; activityIndex: number }) => {
       const groupRoomId = `group-${data.groupId}`;
-      console.log(`[LiveSession] Teacher changing activity to index ${data.activityIndex} for session ${data.sessionId}`);
-      
-      // Broadcast to all students in this group
+      const roomSockets = (socket as any).adapter?.rooms?.get(groupRoomId);
+      const roomSize = roomSockets ? roomSockets.size : 0;
+      console.log(`[LiveSession] activity-change → session=${data.sessionId} groupId=${data.groupId} room=${groupRoomId} clients=${roomSize} idx=${data.activityIndex}`);
+
       socket.to(groupRoomId).emit('session:activity-changed', {
         sessionId: data.sessionId,
         activityIndex: data.activityIndex
