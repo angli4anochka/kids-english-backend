@@ -986,6 +986,7 @@ app.get('/groups', async (req, res) => {
       LEFT JOIN group_students gs ON g.id = gs.group_id
       LEFT JOIN students s ON gs.student_id = s.id
       WHERE g.teacher_id = $1
+         OR g.id IN (SELECT group_id FROM group_teacher_access WHERE teacher_id = $1)
       GROUP BY g.id
       ORDER BY g.created_at DESC
     `, [teacherId]);
