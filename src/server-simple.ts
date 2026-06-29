@@ -151,8 +151,11 @@ app.get('/lessons/:lessonId/activities', async (req, res) => {
   try {
     const { lessonId } = req.params;
     const slim = req.query.slim === '1';
+    // slim mode strips content_data and replaces base64 data: URLs with NULL to keep payload tiny
     const cols = slim
-      ? 'id, lesson_id, type, title, subtitle, content_url, order_index, points, created_at'
+      ? `id, lesson_id, type, title, subtitle,
+         CASE WHEN content_url LIKE 'data:%' THEN NULL ELSE content_url END AS content_url,
+         order_index, points, created_at`
       : '*';
 
     const result = await pool.query(
