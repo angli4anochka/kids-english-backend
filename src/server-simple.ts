@@ -152,7 +152,7 @@ app.get('/lessons/:lessonId/activities', async (req, res) => {
     const { lessonId } = req.params;
     const slim = req.query.slim === '1';
     const cols = slim
-      ? 'id, lesson_id, type, title, subtitle, content_url, audio_url, order_index, points, created_at, updated_at'
+      ? 'id, lesson_id, type, title, subtitle, content_url, order_index, points, created_at'
       : '*';
 
     const result = await pool.query(
