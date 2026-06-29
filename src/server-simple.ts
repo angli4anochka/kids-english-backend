@@ -61,19 +61,7 @@ app.get('/lessons/:id', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Lesson not found' });
     }
 
-    // Get activities for this lesson
-    const activities = await pool.query(
-      'SELECT * FROM lesson_activities WHERE lesson_id = $1 ORDER BY order_index',
-      [id]
-    );
-
-    res.json({
-      success: true,
-      data: {
-        ...result.rows[0],
-        activities: activities.rows
-      }
-    });
+    res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error('Error fetching lesson:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch lesson' });
