@@ -146,12 +146,17 @@ app.put('/lessons/:id', async (req, res) => {
 });
 
 // GET /lessons/:lessonId/activities - Get all activities for a lesson
+// ?slim=1 strips content_data for fast initial load; default returns full data
 app.get('/lessons/:lessonId/activities', async (req, res) => {
   try {
     const { lessonId } = req.params;
+    const slim = req.query.slim === '1';
+    const cols = slim
+      ? 'id, lesson_id, type, title, subtitle, content_url, audio_url, order_index, points, created_at, updated_at'
+      : '*';
 
     const result = await pool.query(
-      'SELECT * FROM lesson_activities WHERE lesson_id = $1 ORDER BY order_index',
+      `SELECT ${cols} FROM lesson_activities WHERE lesson_id = $1 ORDER BY order_index`,
       [lessonId]
     );
 
@@ -159,6 +164,27 @@ app.get('/lessons/:lessonId/activities', async (req, res) => {
   } catch (error) {
     console.error('Error fetching activities:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch activities' });
+  }
+});
+
+// GET /lessons/:lessonId/activities/:activityId - Get single activity with full content_data
+app.get('/lessons/:lessonId/activities/:activityId', async (req, res) => {
+  try {
+    const { lessonId, activityId } = req.params;
+    if (!isUuid(activityId) || !isUuid(lessonId)) {
+      return res.status(400).json({ success: false, error: 'lessonId and activityId must be UUIDs' });
+    }
+    const result = await pool.query(
+      'SELECT * FROM lesson_activities WHERE id = $1 AND lesson_id = $2',
+      [activityId, lessonId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Activity not found' });
+    }
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error fetching activity:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch activity' });
   }
 });
 
