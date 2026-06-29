@@ -1080,20 +1080,12 @@ app.get('/groups/:groupId/active-session', async (req, res) => {
 app.get('/groups/:id/progress', async (req, res) => {
   try {
     const { id } = req.params;
-
-    // For now, just return lessons for this group without progress data
-    // since group_lesson_progress table doesn't exist yet
-    const result = await pool.query(`
-      SELECT
-        l.id as lesson_id,
-        l.title as lesson_title,
-        l.island_id,
-        l.order_index
-      FROM lessons l
-      WHERE l.group_id = $1
-      ORDER BY l.island_id, l.order_index
-    `, [id]);
-
+    const result = await pool.query(
+      `SELECT lesson_id, progress_percent, is_completed
+       FROM group_lesson_progress
+       WHERE group_id = $1`,
+      [id]
+    );
     res.json({ success: true, data: result.rows });
   } catch (error) {
     console.error('Error fetching group progress:', error);
@@ -1728,6 +1720,40 @@ app.delete('/live-sessions/:sessionId', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Session not found' });
     }
+
+    const session = result.rows[0];
+    const { lesson_id, group_id, current_step_index } = session;
+
+    // Calculate and save progress for this group+lesson
+    if (lesson_id && group_id) {
+      try {
+        const totalResult = await pool.query(
+          'SELECT COUNT(*) FROM lesson_activities WHERE lesson_id = $1',
+          [lesson_id]
+        );
+        const totalActivities = parseInt(totalResult.rows[0].count, 10);
+        if (totalActivities > 0) {
+          const progressPercent = Math.min(
+            100,
+            Math.round(((current_step_index || 0) + 1) / totalActivities * 100)
+          );
+          const isCompleted = progressPercent >= 100;
+          await pool.query(`
+            INSERT INTO group_lesson_progress (group_id, lesson_id, progress_percent, is_completed, last_session_id)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (group_id, lesson_id) DO UPDATE
+              SET progress_percent = GREATEST(group_lesson_progress.progress_percent, $3),
+                  is_completed     = group_lesson_progress.is_completed OR $4,
+                  last_session_id  = $5,
+                  updated_at       = NOW()
+          `, [group_id, lesson_id, progressPercent, isCompleted, sessionId]);
+        }
+      } catch (progErr) {
+        // Non-fatal — session is still ended, just log
+        console.error('Error saving lesson progress:', progErr);
+      }
+    }
+
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error('Error ending live session:', error);
