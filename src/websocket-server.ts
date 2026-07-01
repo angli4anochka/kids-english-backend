@@ -57,7 +57,7 @@ export function setupWebSocket(httpServer: HttpServer) {
         if (role === 'teacher') {
           // Teacher creates/activates session
           const existing = await pool.query(
-            'SELECT * FROM lesson_sessions WHERE lesson_id =  AND group_id =  AND is_active = true',
+            'SELECT * FROM lesson_sessions WHERE lesson_id = $1 AND group_id = $2 AND is_active = true',
             [lessonId, groupId]
           );
 
@@ -65,14 +65,14 @@ export function setupWebSocket(httpServer: HttpServer) {
             // Reactivate existing session
             session = existing.rows[0];
             await pool.query(
-              'UPDATE lesson_sessions SET is_active = true, updated_at = NOW() WHERE id = ',
+              'UPDATE lesson_sessions SET is_active = true, updated_at = NOW() WHERE id = $1',
               [session.id]
             );
           } else {
             // Create new session
             const result = await pool.query(
               `INSERT INTO lesson_sessions (lesson_id, group_id, teacher_id, current_activity_index, is_active)
-               VALUES (, , , 0, true)
+               VALUES ($1, $2, $3, 0, true)
                RETURNING *`,
               [lessonId, groupId, userId || null]
             );
@@ -82,7 +82,7 @@ export function setupWebSocket(httpServer: HttpServer) {
           // Add teacher as participant
           await pool.query(
             `INSERT INTO session_participants (session_id, user_id, display_name, role, is_online)
-             VALUES (, , , , true)
+             VALUES ($1, $2, $3, $4, true)
              ON CONFLICT DO NOTHING`,
             [session.id, userId, displayName, role]
           );
@@ -90,7 +90,7 @@ export function setupWebSocket(httpServer: HttpServer) {
         } else {
           // Student joins existing session
           const result = await pool.query(
-            'SELECT * FROM lesson_sessions WHERE lesson_id =  AND group_id =  AND is_active = true',
+            'SELECT * FROM lesson_sessions WHERE lesson_id = $1 AND group_id = $2 AND is_active = true',
             [lessonId, groupId]
           );
 
@@ -107,21 +107,21 @@ export function setupWebSocket(httpServer: HttpServer) {
           // Add student as participant
           await pool.query(
             `INSERT INTO session_participants (session_id, user_id, display_name, role, is_online)
-             VALUES (, , , , true)
+             VALUES ($1, $2, $3, $4, true)
              ON CONFLICT DO NOTHING`,
             [session.id, userId, displayName, role]
           );
 
           // Update last_seen_at
           await pool.query(
-            'UPDATE session_participants SET is_online = true, last_seen_at = NOW() WHERE session_id =  AND display_name = ',
+            'UPDATE session_participants SET is_online = true, last_seen_at = NOW() WHERE session_id = $1 AND display_name = $2',
             [session.id, displayName]
           );
         }
 
         // Get all online participants
         const participantsResult = await pool.query(
-          'SELECT display_name, role, is_online FROM session_participants WHERE session_id =  AND is_online = true',
+          'SELECT display_name, role, is_online FROM session_participants WHERE session_id = $1 AND is_online = true',
           [session.id]
         );
 
@@ -174,7 +174,7 @@ export function setupWebSocket(httpServer: HttpServer) {
 
         // Update in database
         await pool.query(
-          'UPDATE lesson_sessions SET current_activity_index = , updated_at = NOW() WHERE lesson_id =  AND group_id =  AND is_active = true',
+          'UPDATE lesson_sessions SET current_activity_index = $1, updated_at = NOW() WHERE lesson_id = $2 AND group_id = $3 AND is_active = true',
           [activityIndex, lessonId || currentSessionId, groupId]
         );
 
@@ -192,28 +192,6 @@ export function setupWebSocket(httpServer: HttpServer) {
       } catch (error) {
         console.error('[Session] Error changing activity:', error);
         callback({ success: false, error: 'Failed to change activity' });
-      }
-    });
-
-    // Update progress (student)
-    socket.on('update-progress', async (data: any) => {
-      try {
-        const { activityId, score, completed } = data;
-
-        console.log(`[Session] Student progress update: activity=${activityId}, score=${score}, completed=${completed}`);
-
-        // Broadcast to teacher
-        if (currentRoomId) {
-          socket.to(currentRoomId).emit('student-progress', {
-            studentId: socket.id,
-            activityId,
-            score,
-            completed
-          });
-        }
-
-      } catch (error) {
-        console.error('[Session] Error updating progress:', error);
       }
     });
 
@@ -238,37 +216,6 @@ export function setupWebSocket(httpServer: HttpServer) {
       socket.to(lessonRoomId).emit('navigate-to-lesson', { url: data.url });
     });
 
-    // Teacher changes activity (alternative event name for compatibility)
-    socket.on('activity-change', (data: { lessonId: string; groupId: number; newIndex: number }) => {
-      const lessonRoomId = `lesson-${data.lessonId}-group-${data.groupId}`;
-      console.log(`[Lesson] Teacher changed activity to index ${data.newIndex} in ${lessonRoomId}`);
-
-      socket.to(lessonRoomId).emit('activity-change', {
-        lessonId: data.lessonId,
-        newIndex: data.newIndex,
-      });
-    });
-
-    // Teacher toggles interactive mode
-    socket.on('interactive-toggle', async (data: { lessonId: string; groupId: number; isEnabled: boolean }) => {
-      const lessonRoomId = `lesson-${data.lessonId}-group-${data.groupId}`;
-      console.log(`[Lesson] Teacher toggled interactive mode to ${data.isEnabled} in ${lessonRoomId}`);
-
-      // Update in database
-      try {
-        await pool.query(
-          'UPDATE lesson_sessions SET is_interactive_enabled =  WHERE lesson_id =  AND group_id =  AND is_active = true',
-          [data.isEnabled, data.lessonId, data.groupId]
-        );
-      } catch (error) {
-        console.error('[Session] Error updating interactive mode:', error);
-      }
-
-      socket.to(lessonRoomId).emit('interactive-toggle', {
-        lessonId: data.lessonId,
-        isEnabled: data.isEnabled,
-      });
-    });
     // New event handlers for live session synchronization
     socket.on('session:activity-change', (data: { sessionId: string; groupId: number; activityIndex: number }) => {
       const groupRoomId = `group-${data.groupId}`;
@@ -434,10 +381,10 @@ export function setupWebSocket(httpServer: HttpServer) {
         try {
           // Mark participant as offline
           await pool.query(
-            `UPDATE session_participants 
-             SET is_online = false, last_seen_at = NOW() 
+            `UPDATE session_participants
+             SET is_online = false, last_seen_at = NOW()
              WHERE session_id IN (
-               SELECT id FROM lesson_sessions WHERE lesson_id =  AND is_active = true
+               SELECT id FROM lesson_sessions WHERE lesson_id = $1 AND is_active = true
              )`,
             [currentSessionId]
           );
