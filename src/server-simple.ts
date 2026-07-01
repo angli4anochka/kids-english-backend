@@ -29,7 +29,7 @@ const isUuid = (s: unknown): s is string => typeof s === 'string' && UUID_RE.tes
 // Rewrite direct Object Storage URLs to the CDN domain, if configured.
 // Off by default (MEDIA_CDN_BASE_URL unset) — direct S3 URLs keep working
 // until the CDN's SSL cert is confirmed live, so this is safe to deploy early.
-const STORAGE_BASE = 'https://storage.yandexcloud.net/kids-english-media';
+const STORAGE_BASE = 'https://storage.yandexcloud.net/kids-app';
 const CDN_BASE = process.env.MEDIA_CDN_BASE_URL;
 
 function withCdnUrls<T>(row: T): T {
