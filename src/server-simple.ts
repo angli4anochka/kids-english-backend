@@ -26,6 +26,19 @@ const pool = new Pool(poolConfig);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (s: unknown): s is string => typeof s === 'string' && UUID_RE.test(s);
 
+// Rewrite direct Object Storage URLs to the CDN domain, if configured.
+// Off by default (MEDIA_CDN_BASE_URL unset) — direct S3 URLs keep working
+// until the CDN's SSL cert is confirmed live, so this is safe to deploy early.
+const STORAGE_BASE = 'https://storage.yandexcloud.net/kids-english-media';
+const CDN_BASE = process.env.MEDIA_CDN_BASE_URL;
+
+function withCdnUrls<T>(row: T): T {
+  if (!CDN_BASE) return row;
+  const raw = JSON.stringify(row);
+  if (!raw.includes(STORAGE_BASE)) return row;
+  return JSON.parse(raw.split(STORAGE_BASE).join(CDN_BASE));
+}
+
 // Middleware
 app.use(cors());
 // Activities (esp. snake/letter games) embed images as base64 — bump body limit from default 100kb
@@ -163,7 +176,7 @@ app.get('/lessons/:lessonId/activities', async (req, res) => {
       [lessonId]
     );
 
-    res.json({ success: true, data: result.rows });
+    res.json({ success: true, data: result.rows.map(withCdnUrls) });
   } catch (error) {
     console.error('Error fetching activities:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch activities' });
@@ -184,7 +197,7 @@ app.get('/lessons/:lessonId/activities/:activityId', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Activity not found' });
     }
-    res.json({ success: true, data: result.rows[0] });
+    res.json({ success: true, data: withCdnUrls(result.rows[0]) });
   } catch (error) {
     console.error('Error fetching activity:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch activity' });
