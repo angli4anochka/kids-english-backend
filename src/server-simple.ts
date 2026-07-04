@@ -1624,7 +1624,11 @@ app.get('/live-sessions/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
 
     const result = await pool.query(
-      'SELECT *, current_step_index AS current_activity_index FROM live_sessions WHERE id = $1',
+      `SELECT ls.*, ls.current_step_index AS current_activity_index, c.name AS course_name
+       FROM live_sessions ls
+       LEFT JOIN lessons l ON l.id = ls.lesson_id
+       LEFT JOIN courses c ON c.id = l.course_id
+       WHERE ls.id = $1`,
       [sessionId]
     );
 
