@@ -1919,7 +1919,7 @@ app.get('/spotlight/session-results', async (req, res) => {
       `SELECT sr.*, la.title as activity_title, la.order_index
        FROM spotlight_results sr
        LEFT JOIN lesson_activities la ON la.id = sr.activity_id
-       WHERE sr.session_id =  AND sr.student_id = 
+       WHERE sr.session_id = $1 AND sr.student_id = $2
        ORDER BY la.order_index ASC, sr.submitted_at ASC`,
       [sessionId, studentId]
     );
