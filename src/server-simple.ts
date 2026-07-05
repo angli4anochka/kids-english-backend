@@ -885,10 +885,25 @@ app.get('/courses/:id/groups', async (req, res) => {
     const result = await pool.query(`
       SELECT g.*,
              gc.current_lesson_id,
-             l.title as current_lesson_title
+             l.title as current_lesson_title,
+             COALESCE(lesson_counts.total_lessons, 0)::int as total_lessons,
+             COALESCE(progress_counts.completed_lessons, 0)::int as completed_lessons
       FROM groups g
       INNER JOIN group_courses gc ON g.id = gc.group_id
       LEFT JOIN lessons l ON gc.current_lesson_id = l.id
+      LEFT JOIN (
+        SELECT course_id, COUNT(*) as total_lessons
+        FROM lessons
+        WHERE is_deleted = false
+        GROUP BY course_id
+      ) lesson_counts ON lesson_counts.course_id = $1::uuid
+      LEFT JOIN (
+        SELECT glp.group_id, COUNT(DISTINCT glp.lesson_id) as completed_lessons
+        FROM group_lesson_progress glp
+        INNER JOIN lessons cl ON cl.id = glp.lesson_id
+        WHERE glp.is_completed = true AND cl.course_id = $1::uuid
+        GROUP BY glp.group_id
+      ) progress_counts ON progress_counts.group_id = g.id
       WHERE gc.course_id = $1
       ORDER BY g.name
     `, [id]);
@@ -1908,6 +1923,28 @@ app.get('/spotlight/results/:lessonId', async (req, res) => {
   }
 });
 
+// GET /spotlight/session-all-results - teacher gets every student's results for a session
+app.get('/spotlight/session-all-results', async (req, res) => {
+  try {
+    const { sessionId } = req.query;
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'sessionId required' });
+    }
+    const result = await pool.query(
+      `SELECT sr.*, la.title as activity_title, la.order_index
+       FROM spotlight_results sr
+       LEFT JOIN lesson_activities la ON la.id = sr.activity_id
+       WHERE sr.session_id = $1
+       ORDER BY la.order_index ASC, sr.submitted_at ASC`,
+      [sessionId]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching session results for teacher:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch results' });
+  }
+});
+
 // GET /spotlight/session-results - get one student's results for a session
 app.get('/spotlight/session-results', async (req, res) => {
   try {
@@ -1929,6 +1966,111 @@ app.get('/spotlight/session-results', async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to fetch results' });
   }
 });
+// POST /spotlight/practice-exercise - generate AI practice exercises from a student's mistakes
+app.post('/spotlight/practice-exercise', async (req, res) => {
+  try {
+    const { sessionId, studentId } = req.body;
+    if (!sessionId || !studentId) {
+      return res.status(400).json({ success: false, error: 'sessionId and studentId required' });
+    }
+
+    // Serve cached result if we already generated one for this session+student
+    const cached = await pool.query(
+      'SELECT generated_text, created_at FROM practice_exercises WHERE session_id = $1 AND student_id = $2 ORDER BY created_at DESC LIMIT 1',
+      [sessionId, studentId]
+    );
+    if (cached.rows.length > 0) {
+      return res.json({ success: true, data: { generatedText: cached.rows[0].generated_text, cached: true } });
+    }
+
+    const resultsQuery = await pool.query(
+      `SELECT sr.*, la.title as activity_title
+       FROM spotlight_results sr
+       LEFT JOIN lesson_activities la ON la.id = sr.activity_id
+       WHERE sr.session_id = $1 AND sr.student_id = $2`,
+      [sessionId, studentId]
+    );
+
+    const mistakes: Array<{ topic: string; sentence?: string; correctAnswer?: string; studentAnswer?: string }> = [];
+    for (const row of resultsQuery.rows) {
+      const details = Array.isArray(row.results) ? row.results : [];
+      for (const d of details) {
+        if (d && d.isCorrect === false) {
+          mistakes.push({
+            topic: row.activity_title || 'Grammar',
+            sentence: d.sentence,
+            correctAnswer: d.correctAnswer,
+            studentAnswer: d.studentAnswer,
+          });
+        }
+      }
+    }
+
+    if (mistakes.length === 0) {
+      return res.json({ success: true, data: { generatedText: 'Ошибок нет — ученик прошёл упражнения без ошибок, дополнительная тренировка не требуется. 🎉', noErrors: true } });
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ success: false, error: 'OPENAI_API_KEY is not configured on the server' });
+    }
+
+    const mistakesLines = mistakes.map((m, i) => {
+      const correct = m.sentence || m.correctAnswer || '';
+      return (i + 1) + '. Topic: ' + m.topic + '. Correct: "' + correct + '". Student wrote: "' + m.studentAnswer + '"';
+    });
+    const mistakesList = mistakesLines.join('\n');
+
+    const systemPrompt = [
+      'You are an assistant for a children English teacher.',
+      'Given a list of a specific student mistakes (grammar topic, the correct sentence, and what the student wrote instead),',
+      'write 5 new short practice sentences or fill-in-the-blank tasks targeting the SAME grammar points',
+      '(do not reuse the exact same sentences). Keep vocabulary simple, suitable for a child learning English.',
+      'After the English exercises, add one short sentence in Russian for the teacher explaining what grammar point this practices.',
+      'Format the output as a numbered list.',
+    ].join(' ');
+
+    const aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.OPENAI_API_KEY,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.7,
+        max_tokens: 700,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: 'Student mistakes this lesson:\n' + mistakesList + '\n\nGenerate 5 new practice tasks for this student.' },
+        ],
+      }),
+    });
+
+    if (!aiResponse.ok) {
+      const errText = await aiResponse.text();
+      console.error('OpenAI API error:', aiResponse.status, errText);
+      return res.status(502).json({ success: false, error: 'Failed to generate practice exercise' });
+    }
+
+    const aiData: any = await aiResponse.json();
+    const generatedText = aiData.choices?.[0]?.message?.content || '';
+
+    const studentName = resultsQuery.rows[0]?.student_name || 'Ученик';
+    const lessonId = resultsQuery.rows[0]?.lesson_id || null;
+
+    await pool.query(
+      `INSERT INTO practice_exercises (session_id, student_id, student_name, lesson_id, source_errors, generated_text)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [sessionId, studentId, studentName, lessonId, JSON.stringify(mistakes), generatedText]
+    );
+
+    res.json({ success: true, data: { generatedText, cached: false } });
+  } catch (error) {
+    console.error('Error generating practice exercise:', error);
+    res.status(500).json({ success: false, error: 'Failed to generate practice exercise' });
+  }
+});
+
 // ==================== END SPOTLIGHT RESULTS ====================
 
 // Setup WebSocket
