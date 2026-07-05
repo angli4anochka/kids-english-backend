@@ -13,3 +13,5 @@ yarn-error.log*
 
 # build artifacts
 *.tar.gz
+.env.bak*
+.env
