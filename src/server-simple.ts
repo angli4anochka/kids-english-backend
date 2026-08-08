@@ -27,7 +27,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const isUuid = (s: unknown): s is string => typeof s === 'string' && UUID_RE.test(s);
 
 // Rewrite direct Object Storage URLs to the CDN domain, if configured.
-// Off by default (MEDIA_CDN_BASE_URL unset) — direct S3 URLs keep working
+// Off by default (MEDIA_CDN_BASE_URL unset) вЂ” direct S3 URLs keep working
 // until the CDN's SSL cert is confirmed live, so this is safe to deploy early.
 const STORAGE_BASE = 'https://storage.yandexcloud.net/kids-app';
 const CDN_BASE = process.env.MEDIA_CDN_BASE_URL;
@@ -41,7 +41,7 @@ function withCdnUrls<T>(row: T): T {
 
 // Middleware
 app.use(cors());
-// Activities (esp. snake/letter games) embed images as base64 — bump body limit from default 100kb
+// Activities (esp. snake/letter games) embed images as base64 вЂ” bump body limit from default 100kb
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -111,7 +111,7 @@ app.post('/lessons', async (req, res) => {
       INSERT INTO lessons (title, description, island_id, emoji, status, order_index, course_id, book_id, unit_number)
       VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8)
       RETURNING *
-    `, [title, description || null, islandId || null, emoji || '🏝️', insertOrder, courseId || null, bookId || null, unit_number ?? null]);
+    `, [title, description || null, islandId || null, emoji || 'рџЏќпёЏ', insertOrder, courseId || null, bookId || null, unit_number ?? null]);
 
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
@@ -124,7 +124,18 @@ app.post('/lessons', async (req, res) => {
 app.put('/lessons/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, status, unit_number, order_index } = req.body;
+    const {
+      title,
+      description,
+      status,
+      unit_number,
+      unit_name,
+      order_index,
+      course_id,
+      courseId,
+      book_id,
+      bookId,
+    } = req.body;
 
     const setClauses = [
       'title = COALESCE($1, title)',
@@ -137,9 +148,23 @@ app.put('/lessons/:id', async (req, res) => {
       params.push(unit_number);
       setClauses.splice(2, 0, `unit_number = $${params.length}`);
     }
+    if (unit_name !== undefined) {
+      params.push(unit_name);
+      setClauses.splice(2, 0, `unit_name = $${params.length}`);
+    }
     if (order_index !== undefined) {
       params.push(order_index);
       setClauses.splice(2, 0, `order_index = $${params.length}`);
+    }
+    const nextCourseId = course_id ?? courseId;
+    if (nextCourseId !== undefined) {
+      params.push(nextCourseId);
+      setClauses.splice(2, 0, `course_id = $${params.length}`);
+    }
+    const nextBookId = book_id ?? bookId;
+    if (nextBookId !== undefined) {
+      params.push(nextBookId);
+      setClauses.splice(2, 0, `book_id = $${params.length}`);
     }
 
     const result = await pool.query(
@@ -233,7 +258,7 @@ app.post('/lessons/:lessonId/activities', async (req, res) => {
 });
 
 // PUT /lessons/:lessonId/activities/reorder - Reorder activities
-// (must come before /:activityId route — Express matches in registration order)
+// (must come before /:activityId route вЂ” Express matches in registration order)
 app.put('/lessons/:lessonId/activities/reorder', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -282,7 +307,10 @@ app.put('/lessons/:lessonId/activities/:activityId', async (req, res) => {
           title = COALESCE($2, title),
           subtitle = COALESCE($3, subtitle),
           content_url = COALESCE($4, content_url),
-          content_data = COALESCE($5, content_data),
+          content_data = CASE
+            WHEN $5::jsonb IS NULL THEN content_data
+            ELSE COALESCE(content_data, '{}'::jsonb) || $5::jsonb
+          END,
           points = COALESCE($6, points),
           order_index = COALESCE($8, order_index)
       WHERE id = $7
@@ -566,7 +594,7 @@ app.post('/auth/login', async (req, res) => {
 
     const user = result.rows[0];
 
-    // If user has a password — verify it
+    // If user has a password вЂ” verify it
     if (user.password_hash) {
       if (!password) {
         return res.status(401).json({ success: false, error: 'Password is required' });
@@ -776,7 +804,7 @@ app.post('/courses', async (req, res) => {
       INSERT INTO courses (name, teacher_id, description, emoji)
       VALUES ($1, $2, $3, $4)
       RETURNING *
-    `, [name, teacherId, description || '', emoji || '📚']);
+    `, [name, teacherId, description || '', emoji || 'рџ“љ']);
 
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
@@ -807,7 +835,7 @@ app.post('/courses/:id/books', async (req, res) => {
     const { title, level_number, emoji, order_index } = req.body;
     const result = await pool.query(
       'INSERT INTO course_books (course_id, title, level_number, emoji, order_index) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [id, title, level_number || null, emoji || '📖', order_index ?? 0]
+      [id, title, level_number || null, emoji || 'рџ“–', order_index ?? 0]
     );
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (error) {
@@ -885,10 +913,25 @@ app.get('/courses/:id/groups', async (req, res) => {
     const result = await pool.query(`
       SELECT g.*,
              gc.current_lesson_id,
-             l.title as current_lesson_title
+             l.title as current_lesson_title,
+             COALESCE(lesson_counts.total_lessons, 0)::int as total_lessons,
+             COALESCE(progress_counts.completed_lessons, 0)::int as completed_lessons
       FROM groups g
       INNER JOIN group_courses gc ON g.id = gc.group_id
       LEFT JOIN lessons l ON gc.current_lesson_id = l.id
+      LEFT JOIN (
+        SELECT course_id, COUNT(*) as total_lessons
+        FROM lessons
+        WHERE is_deleted = false
+        GROUP BY course_id
+      ) lesson_counts ON lesson_counts.course_id = $1::uuid
+      LEFT JOIN (
+        SELECT glp.group_id, COUNT(DISTINCT glp.lesson_id) as completed_lessons
+        FROM group_lesson_progress glp
+        INNER JOIN lessons cl ON cl.id = glp.lesson_id
+        WHERE glp.is_completed = true AND cl.course_id = $1::uuid
+        GROUP BY glp.group_id
+      ) progress_counts ON progress_counts.group_id = g.id
       WHERE gc.course_id = $1
       ORDER BY g.name
     `, [id]);
@@ -1094,9 +1137,18 @@ app.get('/groups/:id/progress', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      `SELECT lesson_id, progress_percent, is_completed
-       FROM group_lesson_progress
-       WHERE group_id = $1`,
+      `SELECT
+         progress.lesson_id,
+         progress.progress_percent,
+         progress.is_completed,
+         progress.last_session_id,
+         lesson.title AS lesson_title,
+         lesson.island_id,
+         lesson.order_index
+       FROM group_lesson_progress progress
+       INNER JOIN lessons lesson ON lesson.id = progress.lesson_id
+       WHERE progress.group_id = $1
+       ORDER BY lesson.island_id, lesson.order_index`,
       [id]
     );
     res.json({ success: true, data: result.rows });
@@ -1267,12 +1319,16 @@ app.post('/students', async (req, res) => {
   try {
     const { groupId, studentName, login, password } = req.body;
 
-    if (!groupId || !studentName || !login || !password) {
+    if (!groupId || !studentName || !login) {
       return res.status(400).json({
         success: false,
-        error: 'Group ID, student name, login and password are required'
+        error: 'Group ID, student name and login are required'
       });
     }
+
+    // The teacher UI allows an empty password and promises an automatically generated PIN.
+    const generatedPin = password ? null : String(Math.floor(100000 + Math.random() * 900000));
+    const effectivePassword = password || generatedPin;
 
     // Check if login already exists
     const existingStudent = await pool.query(
@@ -1283,13 +1339,13 @@ app.post('/students', async (req, res) => {
     if (existingStudent.rows.length > 0) {
       return res.status(400).json({
         success: false,
-        error: `Логин "${login}" уже используется`
+        error: `Р›РѕРіРёРЅ "${login}" СѓР¶Рµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ`
       });
     }
 
     // Hash password
     const bcrypt = require('bcrypt');
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(effectivePassword, 10);
 
     // Create student in students table
     const studentResult = await pool.query(`
@@ -1304,8 +1360,12 @@ app.post('/students', async (req, res) => {
       VALUES ($1, $2)
     `, [groupId, studentResult.rows[0].id]);
 
-    res.status(201).json({ success: true, data: studentResult.rows[0] });
-  } catch (error) {
+    res.status(201).json({
+      success: true,
+      data: studentResult.rows[0],
+      generatedPin
+    });
+  } catch (error: any) {
     console.error('Error creating student:', error); console.error('Error stack:', error.stack);
     res.status(500).json({ success: false, error: 'Failed to create student' });
   }
@@ -1344,7 +1404,20 @@ app.get('/students/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Student not found' });
     }
-    res.json({ success: true, data: result.rows[0] });
+    const achievementsResult = await pool.query(`
+      SELECT achievement_key, name, emoji, earned_at
+      FROM student_achievements
+      WHERE student_id = $1
+      ORDER BY earned_at ASC, id ASC
+      LIMIT 15
+    `, [studentId]);
+    res.json({
+      success: true,
+      data: {
+        ...result.rows[0],
+        achievements: achievementsResult.rows,
+      },
+    });
   } catch (error) {
     console.error('Error fetching student:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch student' });
@@ -1397,7 +1470,7 @@ app.put('/students/:id', async (req, res) => {
       if (existingStudent.rows.length > 0) {
         return res.status(400).json({
           success: false,
-          error: `Логин "${loginValue}" уже используется другим учеником`
+          error: `Р›РѕРіРёРЅ "${loginValue}" СѓР¶Рµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґСЂСѓРіРёРј СѓС‡РµРЅРёРєРѕРј`
         });
       }
     }
@@ -1472,7 +1545,7 @@ app.post('/auth/student-login', async (req, res) => {
     `, [login]);
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Неверный логин или пароль' });
+      return res.status(404).json({ success: false, error: 'РќРµРІРµСЂРЅС‹Р№ Р»РѕРіРёРЅ РёР»Рё РїР°СЂРѕР»СЊ' });
     }
 
     const student = result.rows[0];
@@ -1482,7 +1555,7 @@ app.post('/auth/student-login', async (req, res) => {
     const passwordMatch = await bcrypt.compare(password, student.password_hash);
 
     if (!passwordMatch) {
-      return res.status(401).json({ success: false, error: 'Неверный логин или пароль' });
+      return res.status(401).json({ success: false, error: 'РќРµРІРµСЂРЅС‹Р№ Р»РѕРіРёРЅ РёР»Рё РїР°СЂРѕР»СЊ' });
     }
 
     // Generate token
@@ -1624,7 +1697,11 @@ app.get('/live-sessions/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
 
     const result = await pool.query(
-      'SELECT *, current_step_index AS current_activity_index FROM live_sessions WHERE id = $1',
+      `SELECT ls.*, ls.current_step_index AS current_activity_index, c.name AS course_name
+       FROM live_sessions ls
+       LEFT JOIN lessons l ON l.id = ls.lesson_id
+       LEFT JOIN courses c ON c.id = l.course_id
+       WHERE ls.id = $1`,
       [sessionId]
     );
 
@@ -1673,30 +1750,31 @@ app.post('/live-sessions/:sessionId/results', async (req, res) => {
     const {
       activityId, lessonId,
       studentId, studentName,
-      score, status, timeSeconds, details,
+      score, status, timeSeconds, details, groupId,
     } = req.body;
 
     if (!activityId) {
       return res.status(400).json({ success: false, error: 'activityId is required' });
     }
 
-    // UPSERT — one row per (session, activity, student)
+    // UPSERT вЂ” one row per (session, activity, student)
     const result = await pool.query(
       `INSERT INTO activity_results
-         (session_id, lesson_id, activity_id, student_id, student_name, score, status, time_seconds, details, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+         (session_id, lesson_id, activity_id, student_id, student_name, score, status, time_seconds, details, group_id, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
        ON CONFLICT (session_id, activity_id, student_id) DO UPDATE
        SET score = EXCLUDED.score,
            status = EXCLUDED.status,
            time_seconds = EXCLUDED.time_seconds,
            details = EXCLUDED.details,
            student_name = EXCLUDED.student_name,
+           group_id = EXCLUDED.group_id,
            updated_at = NOW()
        RETURNING *`,
       [sessionId === 'none' ? null : sessionId, lessonId || null, activityId,
        studentId || null, studentName || null,
        score || 0, status || 'completed', timeSeconds || null,
-       details ? JSON.stringify(details) : null]
+       details ? JSON.stringify(details) : null, groupId || null]
     );
 
     res.json({ success: true, data: result.rows[0] });
@@ -1720,6 +1798,273 @@ app.get('/live-sessions/:sessionId/results', async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to fetch results' });
   }
 });
+
+app.get('/lessons/:lessonId/results', async (req, res) => {
+  try {
+    const { lessonId } = req.params;
+    const groupId = req.query.groupId ? Number(req.query.groupId) : null;
+    const values: any[] = [lessonId];
+    let groupFilter = '';
+    if (groupId) {
+      values.push(groupId);
+      groupFilter = ` AND (
+        ar.group_id = $${values.length}
+        OR (
+          ar.group_id IS NULL
+          AND (
+            EXISTS (SELECT 1 FROM group_students gs WHERE gs.group_id = $${values.length} AND gs.student_id = ar.student_id)
+            OR EXISTS (SELECT 1 FROM students s WHERE s.group_id = $${values.length} AND s.id = ar.student_id)
+          )
+        )
+      )`;
+    }
+    const result = await pool.query(
+      `SELECT ar.* FROM activity_results ar
+       WHERE ar.lesson_id = $1${groupFilter}
+       ORDER BY ar.created_at DESC`,
+      values
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching lesson results:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch lesson results' });
+  }
+});
+
+type GrammarMistake = {
+  topic: string;
+  prompt: string;
+  studentAnswer: string;
+  correctAnswer: string;
+};
+
+let grammarTablesReady: Promise<any> | null = null;
+const ensureGrammarTables = () => {
+  if (!grammarTablesReady) {
+    grammarTablesReady = pool.query(`
+      CREATE TABLE IF NOT EXISTS student_grammar_mistakes (
+        id BIGSERIAL PRIMARY KEY,
+        student_id TEXT NOT NULL,
+        student_name TEXT,
+        lesson_id UUID NOT NULL,
+        session_id UUID,
+        activity_id UUID,
+        topic TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        student_answer TEXT NOT NULL,
+        correct_answer TEXT NOT NULL,
+        fingerprint TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_grammar_mistakes_student ON student_grammar_mistakes(student_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_grammar_mistakes_session ON student_grammar_mistakes(session_id);
+      CREATE TABLE IF NOT EXISTS student_grammar_analyses (
+        id BIGSERIAL PRIMARY KEY,
+        student_id TEXT NOT NULL,
+        lesson_id UUID,
+        session_id UUID,
+        lesson_mistakes JSONB NOT NULL,
+        accumulated_mistakes JSONB NOT NULL,
+        analysis_text TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_grammar_analyses_student ON student_grammar_analyses(student_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS student_grammar_exercise_sets (
+        id BIGSERIAL PRIMARY KEY,
+        student_id TEXT NOT NULL,
+        session_id UUID,
+        source_analysis_id BIGINT REFERENCES student_grammar_analyses(id) ON DELETE SET NULL,
+        exercise_count INTEGER NOT NULL DEFAULT 10,
+        generated_text TEXT NOT NULL,
+        student_answers JSONB,
+        score INTEGER,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      ALTER TABLE student_grammar_exercise_sets ADD COLUMN IF NOT EXISTS student_answers JSONB;
+      ALTER TABLE student_grammar_exercise_sets ADD COLUMN IF NOT EXISTS score INTEGER;
+      ALTER TABLE student_grammar_exercise_sets ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_grammar_exercises_student ON student_grammar_exercise_sets(student_id, created_at DESC);
+    `).catch((error: any) => {
+      grammarTablesReady = null;
+      throw error;
+    });
+  }
+  return grammarTablesReady;
+};
+
+const extractWrittenGrammarMistakes = (rawResults: any, topic: string): GrammarMistake[] => {
+  const isHskResult = rawResults?.source === 'hsk3' || rawResults?.source === 'hsk3-lesson1';
+  const details = Array.isArray(rawResults)
+    ? rawResults
+    : [rawResults?.answers, rawResults?.details, rawResults?.items].find(Array.isArray) || [];
+  return details.flatMap((detail: any) => {
+    const isCorrect = detail?.isCorrect ?? detail?.correct;
+    if (!detail || (isCorrect !== false && !(isHskResult && isCorrect == null))) return [];
+    const studentAnswer = String(detail.studentAnswer ?? detail.chosen ?? detail.answer ?? '').trim();
+    const correctAnswer = String(
+      detail.correctAnswer ?? detail.correctPronoun ?? detail.correction ??
+      (isHskResult ? 'Review this HSK 3 answer using the exercise context' : '')
+    ).trim();
+    if (!studentAnswer || !correctAnswer) return [];
+    return [{
+      topic,
+      prompt: String(detail.prompt ?? detail.question ?? detail.item ?? detail.statement ?? detail.sentence ?? topic).trim(),
+      studentAnswer,
+      correctAnswer,
+    }];
+  });
+};
+
+const saveWrittenGrammarMistakes = async (input: {
+  studentId?: string; studentName?: string; lessonId: string; sessionId?: string;
+  activityId?: string; topic: string; results: any;
+}) => {
+  if (!input.studentId) return 0;
+  const mistakes = extractWrittenGrammarMistakes(input.results, input.topic);
+  if (!mistakes.length) return 0;
+  await ensureGrammarTables();
+  const crypto = require('crypto');
+  for (const mistake of mistakes) {
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
+      studentId: input.studentId, lessonId: input.lessonId, sessionId: input.sessionId || null,
+      activityId: input.activityId || null, ...mistake,
+    })).digest('hex');
+    await pool.query(`
+      INSERT INTO student_grammar_mistakes
+        (student_id, student_name, lesson_id, session_id, activity_id, topic, prompt, student_answer, correct_answer, fingerprint)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      ON CONFLICT (fingerprint) DO NOTHING
+    `, [input.studentId, input.studentName || null, input.lessonId, input.sessionId || null,
+      input.activityId || null, mistake.topic, mistake.prompt, mistake.studentAnswer, mistake.correctAnswer, fingerprint]);
+  }
+  return mistakes.length;
+};
+
+const hskChatRate = new Map<string, { startedAt: number; count: number }>();
+
+app.post('/hsk/chat', async (req, res) => {
+  try {
+    if (!process.env.DEEPSEEK_API_KEY) {
+      return res.status(503).json({ success: false, error: 'AI assistant is not configured' });
+    }
+
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const rate = hskChatRate.get(ip);
+    if (!rate || now - rate.startedAt > 10 * 60 * 1000) {
+      hskChatRate.set(ip, { startedAt: now, count: 1 });
+    } else if (rate.count >= 30) {
+      return res.status(429).json({ success: false, error: 'Too many requests' });
+    } else {
+      rate.count += 1;
+    }
+
+    const message = String(req.body?.message || '').trim().slice(0, 2000);
+    if (!message) return res.status(400).json({ success: false, error: 'Message is required' });
+
+    const history = Array.isArray(req.body?.history)
+      ? req.body.history.slice(-12).map((item: any) => ({
+          role: item?.role === 'assistant' ? 'assistant' : 'user',
+          content: String(item?.content || '').slice(0, 2000),
+        })).filter((item: any) => item.content)
+      : [];
+    const context = String(req.body?.context || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+
+    const aiResponse = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        temperature: 0.25,
+        max_tokens: 900,
+        messages: [
+          {
+            role: 'system',
+            content: `РўС‹ РґРѕР±СЂРѕР¶РµР»Р°С‚РµР»СЊРЅС‹Р№ РїСЂРµРїРѕРґР°РІР°С‚РµР»СЊ РєРёС‚Р°Р№СЃРєРѕРіРѕ СЏР·С‹РєР° СѓСЂРѕРІРЅСЏ HSK 3. РћС‚РІРµС‡Р°Р№ РїРѕ-СЂСѓСЃСЃРєРё. РљРёС‚Р°Р№СЃРєРёРµ РїСЂРёРјРµСЂС‹ РІСЃРµРіРґР° СЃРѕРїСЂРѕРІРѕР¶РґР°Р№ РїРёРЅСЊРёРЅРµРј Рё РїРµСЂРµРІРѕРґРѕРј. РЎРЅР°С‡Р°Р»Р° РґР°Р№ РєРѕСЂРѕС‚РєРѕРµ РїСЂР°РІРёР»Рѕ, Р·Р°С‚РµРј 2-4 РїСЂРёРјРµСЂР°. Р•СЃР»Рё СѓС‡РµРЅРёРє РїСЂРѕСЃРёС‚ РїСЂРѕРІРµСЂРёС‚СЊ РїСЂРµРґР»РѕР¶РµРЅРёРµ, РїРѕРєР°Р¶Рё РёСЃРїСЂР°РІР»РµРЅРЅС‹Р№ РІР°СЂРёР°РЅС‚ Рё РєСЂР°С‚РєРѕ РѕР±СЉСЏСЃРЅРё РѕС€РёР±РєСѓ. РќРµ РІС‹С…РѕРґРё Р·Р° СЂР°РјРєРё РёР·СѓС‡РµРЅРёСЏ РєРёС‚Р°Р№СЃРєРѕРіРѕ СЏР·С‹РєР°. РљРѕРЅС‚РµРєСЃС‚ С‚РµРєСѓС‰РµРіРѕ СЌРєСЂР°РЅР°: ${context || 'HSK 3, СѓСЂРѕРє 1'}`,
+          },
+          ...history,
+          { role: 'user', content: message },
+        ],
+      }),
+    });
+
+    if (!aiResponse.ok) {
+      throw new Error(`DeepSeek API returned ${aiResponse.status}`);
+    }
+    const data: any = await aiResponse.json();
+    const reply = String(data?.choices?.[0]?.message?.content || '').trim();
+    if (!reply) throw new Error('DeepSeek returned an empty answer');
+    res.json({ success: true, reply });
+  } catch (error) {
+    console.error('HSK chat failed:', error);
+    res.status(500).json({ success: false, error: 'Failed to get AI response' });
+  }
+});
+
+const analyzeGrammarForSession = async (sessionId: string) => {
+  await ensureGrammarTables();
+  const sessionResults = await pool.query(`
+    SELECT sr.*, COALESCE(la.title, 'Grammar') AS activity_title
+    FROM spotlight_results sr
+    LEFT JOIN lesson_activities la ON la.id = sr.activity_id
+    WHERE sr.session_id = $1
+  `, [sessionId]);
+  for (const row of sessionResults.rows) {
+    await saveWrittenGrammarMistakes({
+      studentId: row.student_id,
+      studentName: row.student_name,
+      lessonId: row.lesson_id,
+      sessionId: row.session_id,
+      activityId: row.activity_id,
+      topic: row.activity_title,
+      results: row.results,
+    });
+  }
+  if (!process.env.DEEPSEEK_API_KEY) {
+    console.error('DEEPSEEK_API_KEY is not configured; grammar mistakes were saved but not analyzed');
+    return;
+  }
+  const students = await pool.query(
+    'SELECT DISTINCT student_id FROM student_grammar_mistakes WHERE session_id = $1', [sessionId]
+  );
+  for (const student of students.rows) {
+    const lessonRows = await pool.query(
+      'SELECT * FROM student_grammar_mistakes WHERE session_id = $1 AND student_id = $2 ORDER BY created_at',
+      [sessionId, student.student_id]
+    );
+    const allRows = await pool.query(
+      'SELECT * FROM student_grammar_mistakes WHERE student_id = $1 ORDER BY created_at', [student.student_id]
+    );
+    if (!lessonRows.rows.length) continue;
+    const lessonMistakes = lessonRows.rows.map((row: any) => ({ topic: row.topic, prompt: row.prompt, studentAnswer: row.student_answer, correctAnswer: row.correct_answer }));
+    const accumulatedMistakes = allRows.rows.map((row: any) => ({ lessonId: row.lesson_id, topic: row.topic, prompt: row.prompt, studentAnswer: row.student_answer, correctAnswer: row.correct_answer }));
+    const aiResponse = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}` },
+      body: JSON.stringify({
+        model: 'deepseek-chat', temperature: 0.2, max_tokens: 1200,
+        messages: [
+          { role: 'system', content: 'РўС‹ РјРµС‚РѕРґРёСЃС‚ РїРѕ Р°РЅРіР»РёР№СЃРєРѕР№ РіСЂР°РјРјР°С‚РёРєРµ РґР»СЏ РґРµС‚РµР№. РџСЂРѕР°РЅР°Р»РёР·РёСЂСѓР№ РѕС€РёР±РєРё СѓС‡РµРЅРёРєР°. РћС‚РґРµР»Рё РѕС€РёР±РєРё С‚РµРєСѓС‰РµРіРѕ СѓСЂРѕРєР° РѕС‚ СѓСЃС‚РѕР№С‡РёРІС‹С… РїСЂРѕР±РµР»РѕРІ РїРѕ РІСЃРµР№ РёСЃС‚РѕСЂРёРё. Р’РµСЂРЅРё РєСЂР°С‚РєРёР№ JSON СЃ РїРѕР»СЏРјРё lessonErrors, persistentGaps, priorities, teacherSummary. Р’СЃРµ Р·РЅР°С‡РµРЅРёСЏ Рё СЂРµРєРѕРјРµРЅРґР°С†РёРё РІРЅСѓС‚СЂРё JSON РїРёС€Рё С‚РѕР»СЊРєРѕ РЅР° СЂСѓСЃСЃРєРѕРј СЏР·С‹РєРµ. РќРµ СЃС‡РёС‚Р°Р№ РѕРїРµС‡Р°С‚РєСѓ РіСЂР°РјРјР°С‚РёС‡РµСЃРєРёРј РїСЂРѕР±РµР»РѕРј Р±РµР· РїРѕРІС‚РѕСЂСЏСЋС‰РёС…СЃСЏ РїСЂРёР·РЅР°РєРѕРІ.' },
+          { role: 'system', content: 'The lesson may be Chinese HSK or English. Detect the language from the submitted work. For HSK, analyze Chinese vocabulary and grammar; for English, analyze English. Include ungraded written answers in the review. Return concise JSON with lessonErrors, persistentGaps, priorities, teacherSummary, with every user-facing value written in Russian.' },
+          { role: 'user', content: JSON.stringify({ lessonMistakes, accumulatedMistakes }) },
+        ],
+      }),
+    });
+    if (!aiResponse.ok) throw new Error(`DeepSeek API returned ${aiResponse.status}: ${await aiResponse.text()}`);
+    const aiData: any = await aiResponse.json();
+    const analysisText = aiData.choices?.[0]?.message?.content || '{}';
+    await pool.query(`
+      INSERT INTO student_grammar_analyses
+        (student_id, lesson_id, session_id, lesson_mistakes, accumulated_mistakes, analysis_text)
+      VALUES ($1,$2,$3,$4,$5,$6)
+    `, [student.student_id, lessonRows.rows[0].lesson_id, sessionId,
+      JSON.stringify(lessonMistakes), JSON.stringify(accumulatedMistakes), analysisText]);
+  }
+};
 
 // DELETE /live-sessions/:sessionId - End live session
 app.delete('/live-sessions/:sessionId', async (req, res) => {
@@ -1762,11 +2107,12 @@ app.delete('/live-sessions/:sessionId', async (req, res) => {
           `, [group_id, lesson_id, progressPercent, isCompleted, sessionId]);
         }
       } catch (progErr) {
-        // Non-fatal — session is still ended, just log
+        // Non-fatal вЂ” session is still ended, just log
         console.error('Error saving lesson progress:', progErr);
       }
     }
 
+    void analyzeGrammarForSession(sessionId).catch(error => console.error('DeepSeek grammar analysis failed:', error));
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error('Error ending live session:', error);
@@ -1839,6 +2185,7 @@ app.post('/live-sessions/:sessionId/complete', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Session not found' });
     }
 
+    void analyzeGrammarForSession(sessionId).catch(error => console.error('DeepSeek grammar analysis failed:', error));
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error('Error completing live session:', error);
@@ -1859,6 +2206,23 @@ app.post('/spotlight/results', async (req, res) => {
       return res.status(400).json({ success: false, error: 'lessonId, studentName, results and total are required' });
     }
 
+    const isHskResult = results?.source === 'hsk3' || results?.source === 'hsk3-lesson1';
+    if (isHskResult && activityId) {
+      await pool.query(
+        `DELETE FROM spotlight_results
+         WHERE session_id IS NOT DISTINCT FROM $1 AND activity_id = $2
+           AND (student_id = $3 OR (student_id IS NULL AND student_name = $4))`,
+        [sessionId || null, activityId, studentId || null, studentName]
+      );
+      await ensureGrammarTables();
+      await pool.query(
+        `DELETE FROM student_grammar_mistakes
+         WHERE session_id IS NOT DISTINCT FROM $1 AND activity_id = $2
+           AND (student_id = $3 OR (student_id IS NULL AND student_name = $4))`,
+        [sessionId || null, activityId, studentId || null, studentName]
+      );
+    }
+
     const row = await pool.query(`
       INSERT INTO spotlight_results (lesson_id, activity_id, session_id, student_id, student_name, results, score, total)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1866,7 +2230,15 @@ app.post('/spotlight/results', async (req, res) => {
     `, [lessonId, activityId || null, sessionId || null, studentId || null, studentName,
         JSON.stringify(results), score || 0, total]);
 
-    res.status(201).json({ success: true, data: row.rows[0] });
+    const activity = activityId
+      ? await pool.query('SELECT title FROM lesson_activities WHERE id = $1', [activityId])
+      : { rows: [] };
+    const grammarMistakesSaved = await saveWrittenGrammarMistakes({
+      studentId, studentName, lessonId, sessionId, activityId,
+      topic: activity.rows[0]?.title || 'Grammar', results,
+    });
+
+    res.status(201).json({ success: true, data: row.rows[0], grammarMistakesSaved });
   } catch (error) {
     console.error('Error saving spotlight results:', error);
     res.status(500).json({ success: false, error: 'Failed to save results' });
@@ -1904,6 +2276,28 @@ app.get('/spotlight/results/:lessonId', async (req, res) => {
   }
 });
 
+// GET /spotlight/session-all-results - teacher gets every student's results for a session
+app.get('/spotlight/session-all-results', async (req, res) => {
+  try {
+    const { sessionId } = req.query;
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'sessionId required' });
+    }
+    const result = await pool.query(
+      `SELECT sr.*, la.title as activity_title, la.order_index
+       FROM spotlight_results sr
+       LEFT JOIN lesson_activities la ON la.id = sr.activity_id
+       WHERE sr.session_id = $1
+       ORDER BY la.order_index ASC, sr.submitted_at ASC`,
+      [sessionId]
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error fetching session results for teacher:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch results' });
+  }
+});
+
 // GET /spotlight/session-results - get one student's results for a session
 app.get('/spotlight/session-results', async (req, res) => {
   try {
@@ -1915,7 +2309,7 @@ app.get('/spotlight/session-results', async (req, res) => {
       `SELECT sr.*, la.title as activity_title, la.order_index
        FROM spotlight_results sr
        LEFT JOIN lesson_activities la ON la.id = sr.activity_id
-       WHERE sr.session_id =  AND sr.student_id = 
+       WHERE sr.session_id = $1 AND sr.student_id = $2
        ORDER BY la.order_index ASC, sr.submitted_at ASC`,
       [sessionId, studentId]
     );
@@ -1925,6 +2319,259 @@ app.get('/spotlight/session-results', async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to fetch results' });
   }
 });
+// GET /spotlight/grammar-profile/:studentId - accumulated written mistakes and analyses
+app.get('/spotlight/grammar-profile/:studentId', async (req, res) => {
+  try {
+    await ensureGrammarTables();
+    const { studentId } = req.params;
+    const mistakes = await pool.query(
+      `SELECT id, lesson_id, session_id, activity_id, topic, prompt, student_answer, correct_answer, created_at
+       FROM student_grammar_mistakes WHERE student_id = $1 ORDER BY created_at DESC`, [studentId]
+    );
+    const analyses = await pool.query(
+      `SELECT id, lesson_id, session_id, lesson_mistakes, analysis_text, created_at
+       FROM student_grammar_analyses WHERE student_id = $1 ORDER BY created_at DESC`, [studentId]
+    );
+    res.json({ success: true, data: { mistakes: mistakes.rows, analyses: analyses.rows } });
+  } catch (error) {
+    console.error('Error fetching grammar profile:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch grammar profile' });
+  }
+});
+
+// POST /spotlight/grammar-analysis - rerun analysis for one completed lesson session
+app.post('/spotlight/grammar-analysis', async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) return res.status(400).json({ success: false, error: 'sessionId required' });
+    await analyzeGrammarForSession(sessionId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error analyzing grammar:', error);
+    res.status(502).json({ success: false, error: 'Failed to analyze grammar mistakes' });
+  }
+});
+
+// POST /spotlight/grammar-exercises - create exactly 10 tasks from a student's diagnosed gaps
+app.post('/spotlight/grammar-exercises', async (req, res) => {
+  try {
+    await ensureGrammarTables();
+    const { studentId, sessionId } = req.body;
+    if (!studentId) return res.status(400).json({ success: false, error: 'studentId required' });
+    if (!process.env.DEEPSEEK_API_KEY) return res.status(500).json({ success: false, error: 'DeepSeek is not configured' });
+
+    const analysis = await pool.query(
+      `SELECT id, analysis_text FROM student_grammar_analyses
+       WHERE student_id = $1 AND ($2::uuid IS NULL OR session_id = $2)
+       ORDER BY created_at DESC LIMIT 1`, [studentId, sessionId || null]
+    );
+    const mistakes = await pool.query(
+      `SELECT lesson_id, topic, prompt, student_answer, correct_answer
+       FROM student_grammar_mistakes WHERE student_id = $1 ORDER BY created_at DESC LIMIT 100`, [studentId]
+    );
+    if (!mistakes.rows.length) {
+      return res.status(400).json({ success: false, error: 'РЈ СѓС‡РµРЅРёРєР° РїРѕРєР° РЅРµС‚ СЃРѕС…СЂР°РЅС‘РЅРЅС‹С… РїРёСЃСЊРјРµРЅРЅС‹С… РіСЂР°РјРјР°С‚РёС‡РµСЃРєРёС… РѕС€РёР±РѕРє' });
+    }
+
+    const aiResponse = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}` },
+      body: JSON.stringify({
+        model: 'deepseek-chat', temperature: 0.55, max_tokens: 1800,
+        messages: [
+          { role: 'system', content: 'РЎРѕСЃС‚Р°РІСЊ Р РћР’РќРћ 10 Р·Р°РґР°РЅРёР№ РїРѕ РІСЃРµРј С‚РµРјР°Рј priorities Рё teacherSummary. Р•СЃР»Рё СѓРїРѕРјСЏРЅСѓС‚С‹ РѕС‚СЂРёС†Р°РЅРёСЏ, РјРёРЅРёРјСѓРј 4 Р·Р°РґР°РЅРёСЏ РґРѕР»Р¶РЅС‹ С‚СЂРµР±РѕРІР°С‚СЊ am not/isnвЂ™t/arenвЂ™t. РљРђР–Р”РћР• Р·Р°РґР°РЅРёРµ СЃ РѕС‚СЂРёС†Р°С‚РµР»СЊРЅС‹Рј РѕС‚РІРµС‚РѕРј РѕР±СЏР·Р°РЅРѕ СЃРѕРґРµСЂР¶Р°С‚СЊ РІС‚РѕСЂРѕРµ РєРѕСЂРѕС‚РєРѕРµ РїСЂРµРґР»РѕР¶РµРЅРёРµ СЃ С‚РµРј Р¶Рµ РїРѕРґР»РµР¶Р°С‰РёРј, РєРѕС‚РѕСЂРѕРµ РѕРґРЅРѕР·РЅР°С‡РЅРѕ РїРѕРєР°Р·С‹РІР°РµС‚ РїСЂРѕС‚РёРІРѕРїРѕСЃС‚Р°РІР»РµРЅРёРµ, РЅР°РїСЂРёРјРµСЂ: {"sentence":"I ______ a teacher. I am a student.","answer":"am not"}. РќРµР»СЊР·СЏ СЃРѕР·РґР°РІР°С‚СЊ РЅРµРѕРґРЅРѕР·РЅР°С‡РЅРѕРµ РѕС‚СЂРёС†Р°С‚РµР»СЊРЅРѕРµ Р·Р°РґР°РЅРёРµ РІСЂРѕРґРµ "I ______ a teacher." Р±РµР· РєРѕРЅС‚РµРєСЃС‚Р°. Р•СЃР»Рё СѓРїРѕРјСЏРЅСѓС‚С‹ РІРѕРїСЂРѕСЃС‹, РґРѕР±Р°РІСЊ РјРёРЅРёРјСѓРј 2 РІРѕРїСЂРѕСЃР°. Р’РµСЂРЅРё РўРћР›Р¬РљРћ JSON-РјР°СЃСЃРёРІ Р±РµР· markdown. Р’ РєР°Р¶РґРѕРј РѕР±СЉРµРєС‚Рµ С‚РѕР»СЊРєРѕ sentence Рё answer. РћРґРёРЅ РїСЂРѕРїСѓСЃРє ______. РћС‚РІРµС‚ РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ С‚РѕС‡РЅС‹Рј С‚РµРєСЃС‚РѕРј РґР»СЏ Р°РІС‚РѕРїСЂРѕРІРµСЂРєРё.' },
+          { role: 'user', content: JSON.stringify({ analysis: analysis.rows[0]?.analysis_text || null, accumulatedMistakes: mistakes.rows }) },
+        ],
+      }),
+    });
+    if (!aiResponse.ok) throw new Error(`DeepSeek API returned ${aiResponse.status}: ${await aiResponse.text()}`);
+    const aiData: any = await aiResponse.json();
+    const rawGenerated = String(aiData.choices?.[0]?.message?.content || '').replace(/^```json\s*|```$/g, '').trim();
+    const tasks = JSON.parse(rawGenerated);
+    if (!Array.isArray(tasks) || tasks.length !== 10 || tasks.some((task: any) => !task?.sentence || !task?.answer)) {
+      throw new Error('DeepSeek returned invalid homework JSON');
+    }
+    const generatedText = JSON.stringify(tasks.map((task: any) => ({
+      sentence: String(task.sentence),
+      answer: String(task.answer),
+    })));
+    const saved = await pool.query(`
+      INSERT INTO student_grammar_exercise_sets
+        (student_id, session_id, source_analysis_id, exercise_count, generated_text)
+      VALUES ($1,$2,$3,10,$4) RETURNING id, generated_text, created_at
+    `, [studentId, sessionId || null, analysis.rows[0]?.id || null, generatedText]);
+    res.json({ success: true, data: saved.rows[0] });
+  } catch (error) {
+    console.error('Error generating grammar exercises:', error);
+    res.status(502).json({ success: false, error: 'РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕСЃС‚Р°РІРёС‚СЊ СѓРїСЂР°Р¶РЅРµРЅРёСЏ' });
+  }
+});
+
+app.get('/students/:id/homework', async (req, res) => {
+  try {
+    await ensureGrammarTables();
+    const result = await pool.query(
+      `SELECT id, generated_text, student_answers, score, completed_at, created_at
+       FROM student_grammar_exercise_sets
+       WHERE student_id = $1 AND completed_at IS NULL
+       ORDER BY created_at DESC LIMIT 1`,
+      [req.params.id]
+    );
+    if (!result.rows.length) return res.json({ success: true, data: null });
+    const row = result.rows[0];
+    const tasks = JSON.parse(row.generated_text);
+    const answers = Array.isArray(row.student_answers) ? row.student_answers : [];
+    const normalize = (value: any) => String(value || '').trim().toLowerCase().replace(/[вЂ™вЂ]/g, "'");
+    const checks = row.completed_at
+      ? tasks.map((task: any, index: number) => normalize(answers[index]) === normalize(task.answer))
+      : null;
+    res.json({
+      success: true,
+      data: {
+        id: row.id,
+        tasks: tasks.map((task: any, index: number) => ({ index, sentence: task.sentence })),
+        score: row.score,
+        answers,
+        checks,
+        total: tasks.length,
+        completedAt: row.completed_at,
+        createdAt: row.created_at,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to load homework' });
+  }
+});
+
+app.post('/students/:id/homework/:homeworkId/submit', async (req, res) => {
+  try {
+    await ensureGrammarTables();
+    const result = await pool.query(
+      `SELECT generated_text FROM student_grammar_exercise_sets WHERE id = $1 AND student_id = $2`,
+      [req.params.homeworkId, req.params.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ success: false, error: 'Homework not found' });
+    const tasks = JSON.parse(result.rows[0].generated_text);
+    const answers = Array.isArray(req.body?.answers) ? req.body.answers : [];
+    const normalize = (value: any) => String(value || '').trim().toLowerCase().replace(/[вЂ™вЂ]/g, "'");
+    const checks = tasks.map((task: any, index: number) => normalize(answers[index]) === normalize(task.answer));
+    const score = checks.filter(Boolean).length;
+    await pool.query(
+      `UPDATE student_grammar_exercise_sets
+       SET student_answers = $1, score = $2, completed_at = NOW() WHERE id = $3`,
+      [JSON.stringify(answers), score, req.params.homeworkId]
+    );
+    res.json({ success: true, data: { score, total: tasks.length, checks } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to check homework' });
+  }
+});
+
+// POST /spotlight/practice-exercise - generate AI practice exercises from a student's mistakes
+app.post('/spotlight/practice-exercise', async (req, res) => {
+  try {
+    const { sessionId, studentId } = req.body;
+    if (!sessionId || !studentId) {
+      return res.status(400).json({ success: false, error: 'sessionId and studentId required' });
+    }
+
+    // Serve cached result if we already generated one for this session+student
+    const cached = await pool.query(
+      'SELECT generated_text, created_at FROM practice_exercises WHERE session_id = $1 AND student_id = $2 ORDER BY created_at DESC LIMIT 1',
+      [sessionId, studentId]
+    );
+    if (cached.rows.length > 0) {
+      return res.json({ success: true, data: { generatedText: cached.rows[0].generated_text, cached: true } });
+    }
+
+    const resultsQuery = await pool.query(
+      `SELECT sr.*, la.title as activity_title
+       FROM spotlight_results sr
+       LEFT JOIN lesson_activities la ON la.id = sr.activity_id
+       WHERE sr.session_id = $1 AND sr.student_id = $2`,
+      [sessionId, studentId]
+    );
+
+    const mistakes: Array<{ topic: string; sentence?: string; correctAnswer?: string; studentAnswer?: string }> = [];
+    for (const row of resultsQuery.rows) {
+      const details = Array.isArray(row.results) ? row.results : [];
+      for (const d of details) {
+        if (d && d.isCorrect === false) {
+          mistakes.push({
+            topic: row.activity_title || 'Grammar',
+            sentence: d.sentence,
+            correctAnswer: d.correctAnswer,
+            studentAnswer: d.studentAnswer,
+          });
+        }
+      }
+    }
+
+    if (mistakes.length === 0) {
+      return res.json({ success: true, data: { generatedText: 'РћС€РёР±РѕРє РЅРµС‚ вЂ” СѓС‡РµРЅРёРє РїСЂРѕС€С‘Р» СѓРїСЂР°Р¶РЅРµРЅРёСЏ Р±РµР· РѕС€РёР±РѕРє, РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅР°СЏ С‚СЂРµРЅРёСЂРѕРІРєР° РЅРµ С‚СЂРµР±СѓРµС‚СЃСЏ. рџЋ‰', noErrors: true } });
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ success: false, error: 'OPENAI_API_KEY is not configured on the server' });
+    }
+
+    const mistakesLines = mistakes.map((m, i) => {
+      const correct = m.sentence || m.correctAnswer || '';
+      return (i + 1) + '. Topic: ' + m.topic + '. Correct: "' + correct + '". Student wrote: "' + m.studentAnswer + '"';
+    });
+    const mistakesList = mistakesLines.join('\n');
+
+    const systemPrompt = [
+      'You are an assistant for a children English teacher.',
+      'Given a list of a specific student mistakes (grammar topic, the correct sentence, and what the student wrote instead),',
+      'write 5 new short practice sentences or fill-in-the-blank tasks targeting the SAME grammar points',
+      '(do not reuse the exact same sentences). Keep vocabulary simple, suitable for a child learning English.',
+      'After the English exercises, add one short sentence in Russian for the teacher explaining what grammar point this practices.',
+      'Format the output as a numbered list.',
+    ].join(' ');
+
+    const aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.OPENAI_API_KEY,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.7,
+        max_tokens: 700,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: 'Student mistakes this lesson:\n' + mistakesList + '\n\nGenerate 5 new practice tasks for this student.' },
+        ],
+      }),
+    });
+
+    if (!aiResponse.ok) {
+      const errText = await aiResponse.text();
+      console.error('OpenAI API error:', aiResponse.status, errText);
+      return res.status(502).json({ success: false, error: 'Failed to generate practice exercise' });
+    }
+
+    const aiData: any = await aiResponse.json();
+    const generatedText = aiData.choices?.[0]?.message?.content || '';
+
+    const studentName = resultsQuery.rows[0]?.student_name || 'РЈС‡РµРЅРёРє';
+    const lessonId = resultsQuery.rows[0]?.lesson_id || null;
+
+    await pool.query(
+      `INSERT INTO practice_exercises (session_id, student_id, student_name, lesson_id, source_errors, generated_text)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [sessionId, studentId, studentName, lessonId, JSON.stringify(mistakes), generatedText]
+    );
+
+    res.json({ success: true, data: { generatedText, cached: false } });
+  } catch (error) {
+    console.error('Error generating practice exercise:', error);
+    res.status(500).json({ success: false, error: 'Failed to generate practice exercise' });
+  }
+});
+
 // ==================== END SPOTLIGHT RESULTS ====================
 
 // Setup WebSocket
@@ -1938,7 +2585,7 @@ if (require.main === module) {
   setupWebSocket(httpServer);
 
   httpServer.listen(PORT, () => {
-    console.log(`🚀 Kids English Backend running on port ${PORT}`);
+    console.log(`рџљЂ Kids English Backend running on port ${PORT}`);
   });
 
   process.on('SIGTERM', async () => {
