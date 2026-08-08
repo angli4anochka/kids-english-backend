@@ -1313,6 +1313,89 @@ app.get("/students", async (req, res) => {
   }
 });
 
+// TutorDesk integration. Credentials are exchanged for a JWT and never stored by UniPlay.
+app.post('/tutorsdesk/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ success: false, error: 'Введите email и пароль TutorDesk' });
+    const response = await fetch('https://tutorsdesk.ru/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data: any = await response.json().catch(() => ({}));
+    if (!response.ok || !data.token) return res.status(401).json({ success: false, error: data.error || 'Неверный логин или пароль TutorDesk' });
+    res.json({ success: true, token: data.token });
+  } catch (error) {
+    console.error('[TutorDesk] Login failed:', error);
+    res.status(502).json({ success: false, error: 'TutorDesk временно недоступен' });
+  }
+});
+
+app.post('/tutorsdesk/lesson-completion', async (req, res) => {
+  try {
+    const { token, groupId, topic, homework, attendance } = req.body;
+    if (!token || !groupId || !Array.isArray(attendance)) {
+      return res.status(400).json({ success: false, error: 'Недостаточно данных для TutorDesk' });
+    }
+    const authHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const tdRequest = async (path: string, options: any = {}) => {
+      const response = await fetch(`https://tutorsdesk.ru/api${path}`, { ...options, headers: { ...authHeaders, ...(options.headers || {}) } });
+      const data: any = await response.json().catch(() => null);
+      if (!response.ok) {
+        const problem: any = new Error(data?.error || data?.message || `TutorDesk: ${response.status}`);
+        problem.status = response.status;
+        throw problem;
+      }
+      return data;
+    };
+
+    const localGroup = await pool.query('SELECT name FROM groups WHERE id = $1', [groupId]);
+    const localGroupName = localGroup.rows[0]?.name || '';
+    const [tdStudentsRaw, tdGroupsRaw] = await Promise.all([tdRequest('/students'), tdRequest('/groups')]);
+    const tdStudents = Array.isArray(tdStudentsRaw) ? tdStudentsRaw : (tdStudentsRaw?.data || []);
+    const tdGroups = Array.isArray(tdGroupsRaw) ? tdGroupsRaw : (tdGroupsRaw?.data || []);
+    const normalize = (value: any) => String(value || '').trim().toLocaleLowerCase('ru-RU').replace(/\s+/g, ' ');
+    const tdGroup = tdGroups.find((group: any) => normalize(group.name) === normalize(localGroupName));
+    const today = new Date();
+    const isoDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const attendanceDate = `${String(today.getDate()).padStart(2, '0')}.${String(today.getMonth() + 1).padStart(2, '0')}.${today.getFullYear()}`;
+    const unmatched: string[] = [];
+    const matched: Array<{ tdStudent: any; status: string; name: string }> = [];
+
+    for (const item of attendance) {
+      const tdStudent = tdStudents.find((student: any) => normalize(student.fullName || student.name) === normalize(item.name));
+      if (!tdStudent) unmatched.push(item.name);
+      else matched.push({ tdStudent, status: item.status, name: item.name });
+    }
+
+    await Promise.all(matched.map(item => tdRequest('/attendance', {
+      method: 'POST',
+      body: JSON.stringify({
+        studentId: item.tdStudent.id,
+        date: attendanceDate,
+        status: item.status === 'ABSENT' ? 'ABSENT' : 'PRESENT',
+        ...(tdGroup?.id ? { groupId: tdGroup.id } : {}),
+      }),
+    })));
+
+    const lessonBase = { date: isoDate, topic: topic || 'Урок на UniPlay', homework: homework || '', comment: 'Добавлено после завершения урока в UniPlay' };
+    if (tdGroup?.id) {
+      await tdRequest('/lessons', { method: 'POST', body: JSON.stringify({ ...lessonBase, groupId: tdGroup.id, studentId: null }) });
+    } else {
+      await Promise.all(matched.map(item => tdRequest('/lessons', {
+        method: 'POST',
+        body: JSON.stringify({ ...lessonBase, studentId: item.tdStudent.id, groupId: null }),
+      })));
+    }
+
+    res.json({ success: true, unmatched, matched: matched.length, groupMatched: Boolean(tdGroup) });
+  } catch (error: any) {
+    console.error('[TutorDesk] Completion sync failed:', error);
+    res.status(error?.status === 401 ? 401 : 502).json({ success: false, error: error?.message || 'Ошибка синхронизации TutorDesk' });
+  }
+});
+
 // POST /students - Create a new student
 app.post('/students', async (req, res) => {
   console.log("[DEBUG] POST /students called with body:", req.body);
