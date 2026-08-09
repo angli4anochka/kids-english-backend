@@ -29,6 +29,11 @@ export function setupWebSocket(httpServer: HttpServer) {
     transports: ['websocket', 'polling']
   });
 
+  const forestBoardStates = new Map<string, {
+    positions: Record<string, { x: number; y: number }>;
+    finished: boolean;
+  }>();
+
   io.on('connection', (socket: Socket) => {
     console.log(`[WebSocket] Client connected: ${socket.id}`);
 
@@ -308,6 +313,52 @@ export function setupWebSocket(httpServer: HttpServer) {
       socket.to(groupRoomId).emit('screen-share-stop', data);
     });
 
+
+
+    // Shared Forest Alphabet board: every participant may move any piece.
+    // State is kept per live session/activity so late joiners see the current board.
+    socket.on('forest-board:update', (data: any) => {
+      if (!data?.sessionId || !data?.activityId || data?.groupId == null) return;
+      const key = `${data.sessionId}:${data.activityId}`;
+      const state = forestBoardStates.get(key) || { positions: {}, finished: false };
+
+      if (data.action === 'move' && /^[1-4]$/.test(String(data.piece))) {
+        const x = Math.max(2, Math.min(98, Number(data.x)));
+        const y = Math.max(3, Math.min(97, Number(data.y)));
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        state.positions[String(data.piece)] = { x, y };
+      } else if (data.action === 'reset') {
+        state.positions = {
+          '1': { x: 8.6, y: 23.0 }, '2': { x: 10.2, y: 25.4 },
+          '3': { x: 8.3, y: 28.0 }, '4': { x: 11.0, y: 29.2 }
+        };
+        state.finished = false;
+      } else if (data.action === 'finish') {
+        state.finished = true;
+      } else {
+        return;
+      }
+
+      forestBoardStates.set(key, state);
+      socket.to(`group-${data.groupId}`).emit('forest-board:state', {
+        sessionId: data.sessionId,
+        activityId: data.activityId,
+        positions: state.positions,
+        finished: state.finished
+      });
+    });
+
+    socket.on('forest-board:update:request', (data: any) => {
+      if (!data?.sessionId || !data?.activityId) return;
+      const state = forestBoardStates.get(`${data.sessionId}:${data.activityId}`);
+      if (!state) return;
+      socket.emit('forest-board:state', {
+        sessionId: data.sessionId,
+        activityId: data.activityId,
+        positions: state.positions,
+        finished: state.finished
+      });
+    });
 
     // ========== Video/Audio Control Events ==========
 
