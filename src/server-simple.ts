@@ -1471,6 +1471,32 @@ app.get('/students/leader', async (req, res) => {
   }
 });
 
+const ISLAND_TWO_ACHIEVEMENTS = [
+  'Островные монеты', 'Редкая ракушка', 'Компас путешественника', 'Мешочек островных монет',
+  'Перо Коко', 'Кусочек секретной карты', 'Старинный ключ', 'Голубой кристалл',
+  'Сундук с монетами', 'Островной тотем', 'Зелье удачи', 'Карта сокровищ',
+  'Золотой кокос', 'Сундук с сокровищами', 'Магический камень', 'Золотой ключ',
+  'Корона исследователя', 'Сердце острова', 'Талисман острова', 'Главное сокровище',
+].map((name, index) => ({
+  name,
+  imageUrl: `https://storage.yandexcloud.net/kids-app/public-assets/achievements/island-2/achievement-${String(index + 1).padStart(2, '0')}.png`,
+}));
+
+const awardIslandTwoAchievements = async (db: any, studentId: number, points: number) => {
+  const earnedCount = Math.max(0, Math.min(5, Math.floor((points - 250) / 50)));
+  if (earnedCount === 0) return;
+  const existingResult = await db.query(`SELECT achievement_key, emoji FROM student_achievements WHERE student_id = $1 AND achievement_key LIKE 'island-2-achievement-%'`, [studentId]);
+  const existing = existingResult.rows;
+  const usedImages = new Set(existing.map((item: any) => item.emoji));
+  for (let slot = 1; slot <= earnedCount; slot += 1) {
+    const achievementKey = `island-2-achievement-${slot}`;
+    if (existing.some((item: any) => item.achievement_key === achievementKey)) continue;
+    const available = ISLAND_TWO_ACHIEVEMENTS.filter((item) => !usedImages.has(item.imageUrl));
+    const achievement = available[Math.floor(Math.random() * available.length)];
+    await db.query(`INSERT INTO student_achievements (student_id, achievement_key, name, emoji) VALUES ($1, $2, $3, $4)`, [studentId, achievementKey, achievement.name, achievement.imageUrl]);
+    usedImages.add(achievement.imageUrl);
+  }
+};
 // GET /students/:id - One student's own data (for the student cabinet)
 app.get('/students/:id', async (req, res) => {
   try {
@@ -1487,6 +1513,7 @@ app.get('/students/:id', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Student not found' });
     }
+    await awardIslandTwoAchievements(pool, studentId, Number(result.rows[0].points));
     const achievementsResult = await pool.query(`
       SELECT achievement_key, name, emoji, earned_at
       FROM student_achievements
@@ -1518,14 +1545,26 @@ const updateStudentPoints = async (req: any, res: any) => {
     if (!Number.isFinite(points) || points < 0) {
       return res.status(400).json({ success: false, error: 'points must be a non-negative number' });
     }
-    const result = await pool.query(
-      'UPDATE students SET points = $1 WHERE id = $2 RETURNING id, student_name, points, group_id',
-      [points, studentId]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Student not found' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        'UPDATE students SET points = $1 WHERE id = $2 RETURNING id, student_name, points, group_id',
+        [points, studentId]
+      );
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: 'Student not found' });
+      }
+      await awardIslandTwoAchievements(client, studentId, points);
+      await client.query('COMMIT');
+      res.json({ success: true, data: result.rows[0] });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
-    res.json({ success: true, data: result.rows[0] });
   } catch (error) {
     console.error('Error updating student points:', error);
     res.status(500).json({ success: false, error: 'Failed to update points' });
