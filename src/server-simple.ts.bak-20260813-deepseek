@@ -1,4 +1,3 @@
-import { registerClassroomGames } from './classroom-games';
 import express from 'express';
 import cors from 'cors';
 import { Pool } from 'pg';
@@ -45,8 +44,6 @@ app.use(cors());
 // Activities (esp. snake/letter games) embed images as base64 вЂ” bump body limit from default 100kb
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-
-registerClassroomGames(app, pool);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -1189,26 +1186,6 @@ app.post('/groups', async (req, res) => {
   }
 });
 
-// PUT /groups/:id - Rename a group
-app.put('/groups/:id', async (req, res) => {
-  try {
-    const groupId = parseInt(req.params.id, 10);
-    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-    if (Number.isNaN(groupId)) return res.status(400).json({ success: false, error: 'group id must be a number' });
-    if (!name) return res.status(400).json({ success: false, error: 'Group name is required' });
-    if (name.length > 100) return res.status(400).json({ success: false, error: 'Group name is too long' });
-
-    const result = await pool.query(
-      'UPDATE groups SET name = $1 WHERE id = $2 RETURNING *',
-      [name, groupId]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Group not found' });
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error('Error renaming group:', error);
-    res.status(500).json({ success: false, error: 'Failed to rename group' });
-  }
-});
 // DELETE /groups/:id - Delete a group
 app.delete('/groups/:id', async (req, res) => {
   try {
@@ -1445,7 +1422,7 @@ app.post('/students', async (req, res) => {
     if (existingStudent.rows.length > 0) {
       return res.status(400).json({
         success: false,
-        error: `Логин "${login}" уже используется`
+        error: `Р›РѕРіРёРЅ "${login}" СѓР¶Рµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ`
       });
     }
 
@@ -1615,7 +1592,7 @@ app.put('/students/:id', async (req, res) => {
       if (existingStudent.rows.length > 0) {
         return res.status(400).json({
           success: false,
-          error: `Логин "${loginValue}" уже используется другим учеником`
+          error: `Р›РѕРіРёРЅ "${loginValue}" СѓР¶Рµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґСЂСѓРіРёРј СѓС‡РµРЅРёРєРѕРј`
         });
       }
     }
@@ -1836,31 +1813,6 @@ app.post('/live-sessions', async (req, res) => {
   }
 });
 
-// Cross-browser persistence for HSK self-study.
-app.get('/hsk/self-study-progress', async (req, res) => {
-  try {
-    const userId = String(req.query.userId || '').trim();
-    const lessonId = String(req.query.lessonId || '').trim();
-    if (!userId || !lessonId) return res.status(400).json({ success: false, error: 'userId and lessonId required' });
-    await pool.query(`CREATE TABLE IF NOT EXISTS hsk_self_study_progress (user_id TEXT NOT NULL, lesson_id UUID NOT NULL, stage INTEGER NOT NULL DEFAULT 0, results JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, lesson_id))`);
-    const result = await pool.query('SELECT stage, results, updated_at FROM hsk_self_study_progress WHERE user_id = $1 AND lesson_id = $2', [userId, lessonId]);
-    res.json({ success: true, data: result.rows[0] || null });
-  } catch (error) { console.error('HSK progress load failed:', error); res.status(500).json({ success: false, error: 'Failed to load HSK progress' }); }
-});
-
-app.put('/hsk/self-study-progress', async (req, res) => {
-  try {
-    const userId = String(req.body?.userId || '').trim();
-    const lessonId = String(req.body?.lessonId || '').trim();
-    const stage = Math.max(0, Number(req.body?.stage) || 0);
-    const results = req.body?.results && typeof req.body.results === 'object' ? req.body.results : {};
-    if (!userId || !lessonId) return res.status(400).json({ success: false, error: 'userId and lessonId required' });
-    await pool.query(`CREATE TABLE IF NOT EXISTS hsk_self_study_progress (user_id TEXT NOT NULL, lesson_id UUID NOT NULL, stage INTEGER NOT NULL DEFAULT 0, results JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, lesson_id))`);
-    const saved = await pool.query(`INSERT INTO hsk_self_study_progress (user_id, lesson_id, stage, results) VALUES ($1,$2,$3,$4) ON CONFLICT (user_id, lesson_id) DO UPDATE SET stage = GREATEST(hsk_self_study_progress.stage, EXCLUDED.stage), results = hsk_self_study_progress.results || EXCLUDED.results, updated_at = NOW() RETURNING stage, results, updated_at`, [userId, lessonId, stage, JSON.stringify(results)]);
-    res.json({ success: true, data: saved.rows[0] });
-  } catch (error) { console.error('HSK progress save failed:', error); res.status(500).json({ success: false, error: 'Failed to save HSK progress' }); }
-});
-
 // GET /live-sessions/:sessionId - Get live session details
 app.get('/live-sessions/:sessionId', async (req, res) => {
   try {
@@ -2064,7 +2016,7 @@ const ensureGrammarTables = () => {
 };
 
 const extractWrittenGrammarMistakes = (rawResults: any, topic: string): GrammarMistake[] => {
-  const isHskResult = String(rawResults?.source || '').startsWith('hsk3');
+  const isHskResult = rawResults?.source === 'hsk3' || rawResults?.source === 'hsk3-lesson1';
   const details = Array.isArray(rawResults)
     ? rawResults
     : [rawResults?.answers, rawResults?.details, rawResults?.items].find(Array.isArray) || [];
@@ -2177,17 +2129,12 @@ app.post('/hsk/chat', async (req, res) => {
 
 const analyzeGrammarForSession = async (sessionId: string) => {
   await ensureGrammarTables();
-  const session = await pool.query(
-    'SELECT lesson_id FROM live_sessions WHERE id = $1 LIMIT 1', [sessionId]
-  );
-  const currentLessonId = session.rows[0]?.lesson_id;
-  if (!currentLessonId) throw new Error(`Live session ${sessionId} has no lesson`);
   const sessionResults = await pool.query(`
     SELECT sr.*, COALESCE(la.title, 'Grammar') AS activity_title
     FROM spotlight_results sr
     LEFT JOIN lesson_activities la ON la.id = sr.activity_id
-    WHERE sr.session_id = $1 AND sr.lesson_id = $2
-  `, [sessionId, currentLessonId]);
+    WHERE sr.session_id = $1
+  `, [sessionId]);
   for (const row of sessionResults.rows) {
     await saveWrittenGrammarMistakes({
       studentId: row.student_id,
@@ -2212,9 +2159,7 @@ const analyzeGrammarForSession = async (sessionId: string) => {
       [sessionId, student.student_id]
     );
     const allRows = await pool.query(
-      `SELECT * FROM student_grammar_mistakes
-       WHERE student_id = $1 AND lesson_id <> $2
-       ORDER BY created_at DESC LIMIT 50`, [student.student_id, currentLessonId]
+      'SELECT * FROM student_grammar_mistakes WHERE student_id = $1 ORDER BY created_at', [student.student_id]
     );
     if (!lessonRows.rows.length) continue;
     const lessonMistakes = lessonRows.rows.map((row: any) => ({ topic: row.topic, prompt: row.prompt, studentAnswer: row.student_answer, correctAnswer: row.correct_answer }));
@@ -2227,18 +2172,13 @@ const analyzeGrammarForSession = async (sessionId: string) => {
         messages: [
           { role: 'system', content: 'РўС‹ РјРµС‚РѕРґРёСЃС‚ РїРѕ Р°РЅРіР»РёР№СЃРєРѕР№ РіСЂР°РјРјР°С‚РёРєРµ РґР»СЏ РґРµС‚РµР№. РџСЂРѕР°РЅР°Р»РёР·РёСЂСѓР№ РѕС€РёР±РєРё СѓС‡РµРЅРёРєР°. РћС‚РґРµР»Рё РѕС€РёР±РєРё С‚РµРєСѓС‰РµРіРѕ СѓСЂРѕРєР° РѕС‚ СѓСЃС‚РѕР№С‡РёРІС‹С… РїСЂРѕР±РµР»РѕРІ РїРѕ РІСЃРµР№ РёСЃС‚РѕСЂРёРё. Р’РµСЂРЅРё РєСЂР°С‚РєРёР№ JSON СЃ РїРѕР»СЏРјРё lessonErrors, persistentGaps, priorities, teacherSummary. Р’СЃРµ Р·РЅР°С‡РµРЅРёСЏ Рё СЂРµРєРѕРјРµРЅРґР°С†РёРё РІРЅСѓС‚СЂРё JSON РїРёС€Рё С‚РѕР»СЊРєРѕ РЅР° СЂСѓСЃСЃРєРѕРј СЏР·С‹РєРµ. РќРµ СЃС‡РёС‚Р°Р№ РѕРїРµС‡Р°С‚РєСѓ РіСЂР°РјРјР°С‚РёС‡РµСЃРєРёРј РїСЂРѕР±РµР»РѕРј Р±РµР· РїРѕРІС‚РѕСЂСЏСЋС‰РёС…СЃСЏ РїСЂРёР·РЅР°РєРѕРІ.' },
           { role: 'system', content: 'The lesson may be Chinese HSK or English. Detect the language from the submitted work. For HSK, analyze Chinese vocabulary and grammar; for English, analyze English. Include ungraded written answers in the review. Return concise JSON with lessonErrors, persistentGaps, priorities, teacherSummary, with every user-facing value written in Russian.' },
-          { role: 'system', content: `Ты методист по китайскому и английскому языкам. Анализируй только ошибки текущего урока из lessonMistakes. previousLessonMistakes — отдельная история прошлых уроков: используй её лишь для выявления повторяющихся ошибок и никогда не выдавай прошлую ошибку за ошибку текущего урока. Не придумывай вопрос, правильный ответ или ошибку, если их нет в данных. Для HSK анализируй китайскую лексику и грамматику. Верни краткий JSON с полями lessonErrors, persistentGaps, priorities, teacherSummary; все пользовательские значения пиши по-русски.` },
-          { role: 'user', content: JSON.stringify({ currentLessonId, lessonMistakes, previousLessonMistakes: accumulatedMistakes }) },
+          { role: 'user', content: JSON.stringify({ lessonMistakes, accumulatedMistakes }) },
         ],
       }),
     });
     if (!aiResponse.ok) throw new Error(`DeepSeek API returned ${aiResponse.status}: ${await aiResponse.text()}`);
     const aiData: any = await aiResponse.json();
     const analysisText = aiData.choices?.[0]?.message?.content || '{}';
-    await pool.query(
-      'DELETE FROM student_grammar_analyses WHERE student_id = $1 AND session_id = $2',
-      [student.student_id, sessionId]
-    );
     await pool.query(`
       INSERT INTO student_grammar_analyses
         (student_id, lesson_id, session_id, lesson_mistakes, accumulated_mistakes, analysis_text)
